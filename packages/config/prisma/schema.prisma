@@ -1,0 +1,295 @@
+// packages/config/prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  phone        String?   @unique
+  passwordHash String
+  role         UserRole  @default(USER)
+  kycStatus    KycStatus @default(PENDING)
+  riskScore    Float     @default(0)
+  twoFaEnabled Boolean   @default(false)
+  twoFaSecret  String?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  wallets         Wallet[]
+  kycApplications KycApplication[]
+  auditLogs       AuditLog[]
+
+  @@index([email])
+  @@index([phone])
+  @@index([kycStatus])
+}
+
+enum UserRole {
+  USER
+  MERCHANT
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum KycStatus {
+  PENDING
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+model Wallet {
+  id            String   @id @default(uuid())
+  userId        String
+  chain         String // ethereum | tron | bsc | polygon | solana
+  address       String
+  encPrivateKey String // AES-256 encrypted, KMS-managed DEK
+  createdAt     DateTime @default(now())
+
+  user         User             @relation(fields: [userId], references: [id])
+  transactions Transaction[]
+  bridgeSends  BridgeTransfer[] @relation("sender")
+
+  @@unique([userId, chain])
+  @@index([address])
+  @@index([chain])
+}
+
+model Transaction {
+  id          String    @id @default(uuid())
+  walletId    String
+  txHash      String?   @unique
+  chain       String
+  type        TxType
+  amount      Decimal   @db.Decimal(36, 18)
+  tokenSymbol String
+  fromAddress String
+  toAddress   String
+  status      TxStatus  @default(PENDING)
+  gasUsed     Decimal?
+  blockNumber BigInt?
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+  confirmedAt DateTime?
+
+  wallet   Wallet    @relation(fields: [walletId], references: [id])
+  amlFlags AmlFlag[]
+  // Partition by month in production via pg_partman
+
+  @@index([walletId])
+  @@index([txHash])
+  @@index([chain, status])
+  @@index([createdAt])
+}
+
+enum TxType {
+  SEND
+  RECEIVE
+  MINT
+  BURN
+  BRIDGE_LOCK
+  BRIDGE_MINT
+  SWAP
+}
+
+enum TxStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  REVERTED
+}
+
+model BridgeTransfer {
+  id            String       @id @default(uuid())
+  userId        String
+  walletId      String?
+  srcChain      String
+  dstChain      String
+  srcAddress    String
+  dstAddress    String
+  srcTxHash     String?
+  dstTxHash     String?
+  amount        String // string to preserve precision
+  token         String
+  nonce         String
+  deadline      DateTime
+  status        BridgeStatus @default(PENDING)
+  confirmations Int          @default(0)
+  createdAt     DateTime     @default(now())
+
+  wallet              Wallet?              @relation("sender", fields: [walletId], references: [id])
+  validatorSignatures ValidatorSignature[]
+
+  @@index([srcChain, dstChain])
+  @@index([status])
+  @@index([userId])
+}
+
+enum BridgeStatus {
+  PENDING
+  LOCKED
+  SIGNATURES_COLLECTED
+  MINTED
+  COMPLETED
+  FAILED
+  EXPIRED
+}
+
+model ValidatorSignature {
+  id            String   @id @default(uuid())
+  transferId    String
+  validatorAddr String
+  signature     String
+  signedAt      DateTime @default(now())
+
+  transfer BridgeTransfer @relation(fields: [transferId], references: [id])
+
+  @@unique([transferId, validatorAddr])
+}
+
+model KycApplication {
+  id             String    @id @default(uuid())
+  userId         String
+  provider       String // digilocker | hyperverge | onfido
+  status         KycStatus
+  documentType   String?
+  documentRef    String? // provider reference ID
+  verifiedAt     DateTime?
+  rejectedReason String?
+  createdAt      DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model Treasury {
+  id              String   @id @default(uuid())
+  token           String   @unique // INRX | EGOLD | ESILVER
+  totalSupply     Decimal  @db.Decimal(36, 18)
+  reserveAmount   Decimal  @db.Decimal(36, 18)
+  collateralRatio Decimal  @db.Decimal(8, 4)
+  updatedAt       DateTime @updatedAt
+
+  reserveEntries ReserveEntry[]
+}
+
+model ReserveEntry {
+  id         String    @id @default(uuid())
+  treasuryId String
+  assetType  String // INR_BANK | GOLD_VAULT | SILVER_VAULT | T_BILL
+  amount     Decimal   @db.Decimal(36, 18)
+  custodian  String
+  proofUrl   String?
+  verifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  treasury Treasury @relation(fields: [treasuryId], references: [id])
+}
+
+model Merchant {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  name              String
+  apiKey            String   @unique @default(uuid())
+  webhookUrl        String?
+  settlementAddress String
+  settlementChain   String   @default("tron")
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+
+  paymentRequests PaymentRequest[]
+}
+
+model PaymentRequest {
+  id         String        @id @default(uuid())
+  merchantId String
+  amount     Decimal       @db.Decimal(36, 18)
+  token      String
+  reference  String
+  status     PaymentStatus @default(PENDING)
+  expiresAt  DateTime
+  paidAt     DateTime?
+  txHash     String?
+  createdAt  DateTime      @default(now())
+
+  merchant  Merchant   @relation(fields: [merchantId], references: [id])
+  qrPayment QrPayment?
+
+  @@index([merchantId, status])
+  @@index([expiresAt])
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  EXPIRED
+  CANCELLED
+  REFUNDED
+}
+
+model QrPayment {
+  id        String    @id @default(uuid())
+  paymentId String    @unique
+  qrData    String
+  deepLink  String
+  paidAt    DateTime?
+  txHash    String?
+
+  payment PaymentRequest @relation(fields: [paymentId], references: [id])
+}
+
+model AmlFlag {
+  id            String    @id @default(uuid())
+  transactionId String
+  riskLevel     AmlRisk
+  reason        String
+  status        AmlStatus @default(PENDING_REVIEW)
+  resolvedBy    String?
+  resolvedAt    DateTime?
+  flaggedAt     DateTime  @default(now())
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+
+  @@index([status])
+  @@index([riskLevel])
+}
+
+enum AmlRisk {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AmlStatus {
+  PENDING_REVIEW
+  CLEARED
+  ESCALATED
+  REPORTED
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  action     String
+  entityType String
+  entityId   String?
+  ipAddress  String?
+  userAgent  String?
+  payload    Json?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+  // Partition by month in production
+
+  @@index([userId])
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
