@@ -1,0 +1,28 @@
+{
+  "name": "@ecosystem/contracts-bridge",
+  "version": "1.0.0",
+  "description": "Bridge contracts and validator service for cross-chain transfers",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:sepolia":   "hardhat run scripts/deploy-bridge.ts --network sepolia",
+    "deploy:bsc":       "hardhat run scripts/deploy-bridge.ts --network bscTestnet",
+    "deploy:polygon":   "hardhat run scripts/deploy-bridge.ts --network polygonAmoy",
+    "validator:start":  "ts-node validators/validator.service.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.11.0",
+    "tronweb": "^6.0.0",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@openzeppelin/contracts": "4.9.6",
+    "@openzeppelin/contracts-upgradeable": "4.9.6",
+    "@openzeppelin/hardhat-upgrades": "^3.0.0",
+    "@types/node": "^20.0.0",
+    "hardhat": "^2.28.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}

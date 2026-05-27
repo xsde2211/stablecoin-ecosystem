@@ -1,0 +1,11 @@
+{
+  "network": "https://api.shasta.trongrid.io",
+  "deployedBy": "TR3ATTf97Kq198PV1V79oa51kAJgAsfo1f",
+  "deployedAt": "2026-05-27T14:39:04.041Z",
+  "contracts": {
+    "INRX": "4158c55c66e9b0f152e83766d0a202c33914b43d55",
+    "EGOLD": "414d7052107585f0a7e2524063da2b3a55613bbce6",
+    "ESLVR": "41b99182e3b7f13979fa2717a22fa3e9c45720cee8",
+    "TronBridge": "41f4f00fa3c5c0171a7de6cc12109e2b20fee908d1"
+  }
+}
