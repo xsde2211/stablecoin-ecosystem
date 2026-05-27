@@ -1,0 +1,7 @@
+{
+  "chain": "sepolia",
+  "inrx": "0x33495A55dB4b899B9cE031a43E1FA01C1654FcfF",
+  "treasury": "0xC5Cb2935689D0497516ec9cA15f961a464f0F877",
+  "bridge": "0x3E9CC2cF3B0ba0f2B9312b35D0091635D2Dbb6Bb",
+  "deployedAt": "2026-05-27T04:26:37.577Z"
+}
