@@ -4,10 +4,11 @@
   "private": true,
   "scripts": {
     "build:packages": "pnpm --filter './packages/*' build",
-    "dev:gateway": "pnpm --filter gateway dev",
+    "dev":          "node tools/scripts/dev.cjs",
+    "dev:infra":    "docker compose up -d postgres redis kafka zookeeper",
+    "dev:stop":     "docker compose down",
+    "dev:all":      "pnpm dev:infra && node tools/scripts/dev.cjs",
     "dev:web": "pnpm --filter web dev",
-    "docker:dev": "docker compose up -d postgres redis kafka zookeeper",
-    "docker:stop": "docker compose down",
     "db:migrate": "pnpm --filter @ecosystem/config prisma migrate dev",
     "db:generate": "pnpm --filter @ecosystem/config prisma generate",
     "db:studio": "pnpm --filter @ecosystem/config prisma studio"
