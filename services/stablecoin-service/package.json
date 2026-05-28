@@ -14,7 +14,6 @@
     "@nestjs/passport": "^10.0.0",
     "@nestjs/platform-express": "^10.0.0",
     "@nestjs/swagger": "^7.0.0",
-    "@prisma/client": "^5.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.0",
     "ethers": "^6.11.0",
@@ -29,7 +28,6 @@
     "@nestjs/cli": "^10.0.0",
     "@types/node": "^20.0.0",
     "@types/passport-jwt": "^3.0.0",
-    "prisma": "^5.0.0",
     "typescript": "^5.0.0"
   }
 }

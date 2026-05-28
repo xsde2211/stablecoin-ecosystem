@@ -4,19 +4,19 @@ import { ApiProperty } from '@nestjs/swagger';
 export class SendTokenDto {
   @ApiProperty({ example: 'tron' })
   @IsIn(['tron', 'ethereum', 'bsc', 'polygon', 'solana'])
-  chain: string;
+  chain!: string;
 
   @ApiProperty({ example: 'TXyz...abc' })
   @IsString()
   @IsNotEmpty()
-  toAddress: string;
+  toAddress!: string;
 
   @ApiProperty({ example: 'INRX' })
   @IsIn(['INRX', 'EGOLD', 'ESLVR'])
-  token: string;
+  token!: string;
 
   @ApiProperty({ example: '100.000000' })
   @IsString()
   @IsNotEmpty()
-  amount: string;
+  amount!: string;
 }

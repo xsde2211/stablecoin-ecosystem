@@ -13,3 +13,4 @@ contracts/bridge/deployments
 contracts/solana/target
 
 /setup.sh
+/pnpm-lock.yaml

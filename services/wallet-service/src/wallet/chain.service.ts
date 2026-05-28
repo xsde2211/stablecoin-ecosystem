@@ -5,7 +5,6 @@ import {
   Connection,
   PublicKey,
 } from '@solana/web3.js';
-import { getAssociatedTokenAddress } from '@solana/spl-token';
 
 const ERC20_ABI = [
   'function balanceOf(address) view returns (uint256)',
@@ -66,29 +65,50 @@ export class ChainService {
   private async getTRONBalance(address: string, tokenAddress: string): Promise<string> {
     const tronWeb  = new TronWeb({ fullHost: process.env.TRON_RPC! });
     const contract = await tronWeb.contract(
-      ['function balanceOf(address) view returns (uint256)'],
-      tokenAddress,
-    );
+    [
+      {
+        constant: true,
+        inputs: [
+          {
+            name: '_owner',
+            type: 'address',
+          },
+        ],
+        name: 'balanceOf',
+        outputs: [
+          {
+            name: 'balance',
+            type: 'uint256',
+          },
+        ],
+        stateMutability: 'view',
+        type: 'function',
+      },
+    ],
+    tokenAddress,
+  );
     const balance = await contract.balanceOf(address).call();
     return (BigInt(balance.toString()) / BigInt(1_000_000)).toString();
   }
 
   private async getSolanaBalance(
-    walletAddress: string,
-    mintAddress:   string,
-  ): Promise<string> {
+  walletAddress: string,
+  mintAddress:   string,
+): Promise<string> {
+  try {
+    // Dynamic import fixes the ESM/CJS conflict
+    const splToken = await import('@solana/spl-token');
+
     const wallet = new PublicKey(walletAddress);
     const mint   = new PublicKey(mintAddress);
-    const ata    = await getAssociatedTokenAddress(mint, wallet);
+    const ata    = await splToken.getAssociatedTokenAddress(mint, wallet);
 
-    try {
-      const info = await this.solanaConn.getTokenAccountBalance(ata);
-      return info.value.uiAmountString ?? '0';
-    } catch {
-      return '0';
-    }
+    const info = await this.solanaConn.getTokenAccountBalance(ata);
+    return info.value.uiAmountString ?? '0';
+  } catch {
+    return '0';
   }
-
+}
   // ─── Token transfers ─────────────────────────────────────────────
 
   async sendEVMToken(

@@ -1,13 +1,16 @@
 packages:
   - "contracts/*"
   - "packages/*"
+  - "services/*"
 
 allowBuilds:
+  '@nestjs/core': true
   '@prisma/client': true
   '@prisma/engines': true
   bigint-buffer: true
   bufferutil: true
   keccak: true
+  msgpackr-extract: true
   prisma: true
   secp256k1: true
   utf-8-validate: true

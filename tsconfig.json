@@ -1,16 +1,22 @@
 {
   "compilerOptions": {
     "target": "ES2020",
+
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+
     "strict": true,
-    "ignoreDeprecations": "6.0",
+
+    "ignoreDeprecations": "5.0",
+
     "baseUrl": ".",
+
     "paths": {
       "@ecosystem/*": [
         "packages/*/src"
       ]
     },
+
     "skipLibCheck": true
   }
 }
