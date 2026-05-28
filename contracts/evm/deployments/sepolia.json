@@ -1,7 +1,13 @@
 {
-  "chain": "sepolia",
-  "inrx": "0x33495A55dB4b899B9cE031a43E1FA01C1654FcfF",
-  "treasury": "0xC5Cb2935689D0497516ec9cA15f961a464f0F877",
-  "bridge": "0x3E9CC2cF3B0ba0f2B9312b35D0091635D2Dbb6Bb",
-  "deployedAt": "2026-05-27T04:26:37.577Z"
+  "network": "sepolia",
+  "chainId": "11155111",
+  "deployedBy": "0x6854406766C7C0769ed637A8c690Bf461C145E72",
+  "deployedAt": "2026-05-27T18:22:59.085Z",
+  "contracts": {
+    "INRX": "0x538e0FBfB7885f930f637f1A6d3bE83951ae42d5",
+    "EGold": "0xbD03299ff2089f95849E3ADC9E20765990533B52",
+    "ESilver": "0x0Ce94BB7dE3DC53e26DCc668399757D83af2231E",
+    "Treasury": "0x7B364a1f2d3F65AB17981C1E1BFBdAf84b3805cA",
+    "Bridge": "0x4B4054609d2FB569b7ad61595e19a6D8B7e830D7"
+  }
 }

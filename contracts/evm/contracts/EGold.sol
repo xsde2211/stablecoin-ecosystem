@@ -25,7 +25,8 @@ contract EGold is
 
     mapping(address => bool) private _blacklisted;
     mapping(address => bool) private _frozen;
-
+    uint256 public mintCap;
+    
     // Gold price feed (updated by oracle)
     uint256 public goldPricePerGram; // in INR, 6 decimals
     address public priceOracle;
@@ -40,6 +41,7 @@ contract EGold is
     function initialize(
         address admin,
         address minter,
+        uint256 _mintCap,
         uint256 initialGoldPrice
     ) public initializer {
         __ERC20_init("eGold Token", "EGOLD");
@@ -51,12 +53,14 @@ contract EGold is
         _grantRole(MINTER_ROLE, minter);
         _grantRole(UPGRADER_ROLE, admin);
 
+        mintCap          = _mintCap;
         goldPricePerGram = initialGoldPrice;
         priceOracle = admin;
     }
 
     function mint(address to, uint256 grams) external onlyRole(MINTER_ROLE) {
         require(!_blacklisted[to], "EGold: blacklisted");
+        require(totalSupply() + grams <= mintCap, "EGold: mint cap exceeded");
         _mint(to, grams);
         emit Mint(to, grams, goldPricePerGram);
     }

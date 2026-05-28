@@ -26,7 +26,7 @@ contract ESilver is
 
     uint256 public silverPricePerGram; // in INR, 6 decimals
     address public priceOracle;
-
+    uint256 public mintCap;
     event Mint(address indexed to, uint256 grams, uint256 priceAtMint);
     event Burn(address indexed from, uint256 grams);
 
@@ -36,6 +36,7 @@ contract ESilver is
     function initialize(
         address admin,
         address minter,
+        uint256 _mintCap,
         uint256 initialSilverPrice
     ) public initializer {
         __ERC20_init("eSilver Token", "ESLVR");
@@ -46,6 +47,7 @@ contract ESilver is
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(MINTER_ROLE, minter);
         _grantRole(UPGRADER_ROLE, admin);
+        mintCap = _mintCap;
 
         silverPricePerGram = initialSilverPrice;
         priceOracle = admin;
@@ -53,6 +55,7 @@ contract ESilver is
 
     function mint(address to, uint256 grams) external onlyRole(MINTER_ROLE) {
         require(!_blacklisted[to], "ESilver: blacklisted");
+        require(totalSupply() + grams <= mintCap, "ESilver: mint cap exceeded");
         _mint(to, grams);
         emit Mint(to, grams, silverPricePerGram);
     }
