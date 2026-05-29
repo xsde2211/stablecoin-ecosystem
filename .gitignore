@@ -4,6 +4,8 @@ dist
 artifacts
 cache
 typechain-types
+/docs
+/infra
 
 contracts/evm/.openzeppelin
 
