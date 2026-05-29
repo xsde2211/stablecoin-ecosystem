@@ -12,6 +12,8 @@ const EVENTS_ABI = [
   "event OperationExecuted(uint256 indexed opId)",
 ];
 
+
+
 interface ChainConfig {
   name:    string;
   rpc:     string;
@@ -40,37 +42,40 @@ export class ListenerService implements OnModuleInit {
 
   private async startEVMListeners() {
     const chains: ChainConfig[] = [
-      {
-        name:   "ethereum",
-        rpc:    process.env.ETH_RPC!,
-        tokens: [
-          process.env.ETH_INRX_ADDRESS!,
-          process.env.ETH_EGOLD_ADDRESS!,
-          process.env.ETH_ESLVR_ADDRESS!,
-        ].filter(Boolean),
-        bridge: process.env.ETH_BRIDGE_ADDRESS!,
-      },
-      {
-        name:   "bsc",
-        rpc:    process.env.BSC_RPC!,
-        tokens: [
-          process.env.BSC_INRX_ADDRESS!,
-          process.env.BSC_EGOLD_ADDRESS!,
-          process.env.BSC_ESLVR_ADDRESS!,
-        ].filter(Boolean),
-        bridge: process.env.BSC_BRIDGE_ADDRESS!,
-      },
-      {
-        name:   "polygon",
-        rpc:    process.env.POLYGON_RPC!,
-        tokens: [
-          process.env.POLYGON_INRX_ADDRESS!,
-          process.env.POLYGON_EGOLD_ADDRESS!,
-          process.env.POLYGON_ESLVR_ADDRESS!,
-        ].filter(Boolean),
-        bridge: process.env.POLYGON_BRIDGE_ADDRESS!,
-      },
-    ];
+  {
+    name: "ethereum",
+    rpc: process.env.ETH_RPC!,
+    wsRpc: process.env.ETH_WS_RPC!,
+    tokens: [
+      process.env.ETH_INRX_ADDRESS!,
+      process.env.ETH_EGOLD_ADDRESS!,
+      process.env.ETH_ESLVR_ADDRESS!,
+    ].filter(Boolean),
+    bridge: process.env.ETH_BRIDGE_ADDRESS!,
+  },
+  {
+    name: "bsc",
+    rpc: process.env.BSC_RPC!,
+    wsRpc: process.env.BSC_WS_RPC || "",
+    tokens: [
+      process.env.BSC_INRX_ADDRESS!,
+      process.env.BSC_EGOLD_ADDRESS!,
+      process.env.BSC_ESLVR_ADDRESS!,
+    ].filter(Boolean),
+    bridge: process.env.BSC_BRIDGE_ADDRESS!,
+  },
+  {
+    name: "polygon",
+    rpc: process.env.POLYGON_RPC!,
+    wsRpc: process.env.POLYGON_WS_RPC!,
+    tokens: [
+      process.env.POLYGON_INRX_ADDRESS!,
+      process.env.POLYGON_EGOLD_ADDRESS!,
+      process.env.POLYGON_ESLVR_ADDRESS!,
+    ].filter(Boolean),
+    bridge: process.env.POLYGON_BRIDGE_ADDRESS!,
+  },
+];
 
     for (const chain of chains) {
       try {
@@ -82,10 +87,14 @@ export class ListenerService implements OnModuleInit {
   }
 
   private async listenEVM(chain: ChainConfig) {
-    // Use ws:// for WebSocket — convert https:// to wss://
-    const wsUrl = chain.rpc
-      .replace("https://", "wss://")
-      .replace("http://",  "ws://");
+
+    if (!chain.wsRpc) {
+      this.logger.warn(
+        `No WebSocket URL for ${chain.name}, using polling`
+      );
+      return this.startPolling(chain);
+    }
+    const wsUrl = chain.wsRpc;
 
     let provider: ethers.WebSocketProvider;
     try {
@@ -143,12 +152,18 @@ export class ListenerService implements OnModuleInit {
     }
 
     // Handle disconnects — reconnect after 5s
-    provider.websocket.addEventListener("close", () => {
-      this.logger.warn(`WebSocket closed for ${chain.name}, reconnecting in 5s...`);
-      this.providers.delete(chain.name);
-      setTimeout(() => this.listenEVM(chain), 5000);
-    });
+    const ws = (provider as any).websocket;
 
+    if (ws?.on) {
+      ws.on("close", () => {
+        this.logger.warn(
+          `WebSocket closed for ${chain.name}, reconnecting in 5s...`
+        );
+
+        this.providers.delete(chain.name);
+        setTimeout(() => this.listenEVM(chain), 5000);
+      });
+    }
     this.logger.log(`Listening on ${chain.name} (${chain.tokens.length} tokens + bridge)`);
   }
 
@@ -193,40 +208,63 @@ export class ListenerService implements OnModuleInit {
   // ─── TRON polling (no WebSocket standard) ────────────────────────────────
 
   @Cron("*/3 * * * * *") // every 3 seconds
-  async pollTRON() {
-    try {
-      const bridgeAddress = process.env.TRON_BRIDGE_ADDRESS;
-      if (!bridgeAddress) return;
+async pollTRON() {
+  try {
+    const bridgeAddress = process.env.TRON_BRIDGE_ADDRESS;
+    if (!bridgeAddress) return;
 
-      const tronWeb = new TronWeb({ fullHost: process.env.TRON_RPC! });
+    const tronWeb = new TronWeb({
+      fullHost: process.env.TRON_RPC!,
+    });
 
-      // Get last processed fingerprint from Redis
-      const lastFingerprint = await this.redis.get("tron:last_fingerprint:lock");
+    // Get last processed fingerprint from Redis
+    const lastFingerprint = await this.redis.get(
+      "tron:last_fingerprint:lock"
+    );
 
-      const events = await tronWeb.getEventResult(bridgeAddress, {
-        eventName:   "TokensLocked",
-        size:        20,
-        fingerprint: lastFingerprint ?? undefined,
-      });
+    const events = await tronWeb.getEventResult(bridgeAddress, {
+      eventName: "TokensLocked",
+      limit: 20,
+      fingerprint: lastFingerprint ?? undefined,
+    });
 
-      if (!events?.length) return;
+    const eventList = events.data ?? [];
 
-      for (const event of events) {
-        const alreadyProcessed = await this.redis.exists(`tron:event:${event.transaction}`);
-        if (alreadyProcessed) continue;
-
-        await this.handleTRONLockEvent(event);
-        await this.redis.set(`tron:event:${event.transaction}`, "1", 86_400);
-      }
-
-      // Store last fingerprint for pagination
-      if (events.length > 0) {
-        await this.redis.set("tron:last_fingerprint:lock", events[events.length - 1].fingerprint ?? "", 3600);
-      }
-    } catch (err) {
-      this.logger.error("TRON polling error:", err);
+    if (!eventList.length) {
+      return;
     }
+
+    for (const event of eventList) {
+      const alreadyProcessed = await this.redis.exists(
+        `tron:event:${event.transaction_id}`
+      );
+
+      if (alreadyProcessed) {
+        continue;
+      }
+
+      await this.handleTRONLockEvent(event);
+
+      await this.redis.set(
+        `tron:event:${event.transaction_id}`,
+        "1",
+        86400
+      );
+    }
+
+    // Debug TronWeb 6 response structure
+    this.logger.debug(
+      `TRON processed ${eventList.length} events`
+    );
+
+    // TODO:
+    // Check actual TronWeb 6 response for fingerprint location
+    // console.log(JSON.stringify(events, null, 2));
+
+  } catch (err) {
+    this.logger.error("TRON polling error:", err);
   }
+}
 
   // ─── Event handlers ───────────────────────────────────────────────────────
 
@@ -312,7 +350,7 @@ export class ListenerService implements OnModuleInit {
   }
 
   private async handleTRONLockEvent(event: any) {
-    const txId = event.transaction;
+    const txId = event.transaction_id;
     this.logger.log(`TRON lock event: ${txId}`);
 
     await this.prisma.bridgeTransfer.updateMany({

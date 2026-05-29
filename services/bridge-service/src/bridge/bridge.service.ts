@@ -69,7 +69,7 @@ export class BridgeService {
   // ─── Called by validator after enough signatures collected ───────
 
   async executeMint(transferId: string, signatures: string[]) {
-    const transfer = await this.prisma.bridgeTransfer.findUniqueOrFail({
+    const transfer = await this.prisma.bridgeTransfer.findUnique({
       where: { id: transferId },
     });
 
@@ -109,7 +109,7 @@ export class BridgeService {
   // ─── Query ───────────────────────────────────────────────────────
 
   async getTransfer(id: string) {
-    return this.prisma.bridgeTransfer.findUniqueOrFail({
+    return this.prisma.bridgeTransfer.findUnique({
       where:   { id },
       include: { validatorSignatures: true },
     });
