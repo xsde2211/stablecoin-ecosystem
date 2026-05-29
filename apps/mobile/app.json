@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Stablecoin Wallet",
+    "slug": "stablecoin-wallet",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0A0A0F",
+    "splash": {
+      "backgroundColor": "#0A0A0F",
+      "resizeMode": "contain"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.stablecoin.wallet",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Used to scan QR codes for payments",
+        "NSFaceIDUsageDescription": "Used for biometric authentication"
+      }
+    },
+    "android": {
+      "adaptiveIcon": { "backgroundColor": "#0A0A0F" },
+      "package": "com.stablecoin.wallet",
+      "permissions": ["CAMERA", "USE_BIOMETRIC", "USE_FINGERPRINT"]
+    },
+    "plugins": [
+      "expo-camera",
+      "expo-local-authentication",
+      "expo-secure-store",
+      ["expo-barcode-scanner", { "cameraPermission": "Allow $(APPNAME) to access camera for QR scanning." }]
+    ],
+    "extra": { "eas": { "projectId": "your-eas-project-id" } }
+  }
+}

@@ -2,6 +2,7 @@ packages:
   - "contracts/*"
   - "packages/*"
   - "services/*"
+  - "apps/*"
 
 allowBuilds:
   '@nestjs/core': true
