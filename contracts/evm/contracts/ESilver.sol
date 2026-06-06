@@ -21,14 +21,22 @@ contract ESilver is
     bytes32 public constant MINTER_ROLE   = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE   = keccak256("BURNER_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    bytes32 public constant FREEZER_ROLE     = keccak256("FREEZER_ROLE");
+    bytes32 public constant BLACKLISTER_ROLE = keccak256("BLACKLISTER_ROLE");
+    bytes32 public constant TREASURY_ROLE    = keccak256("TREASURY_ROLE");
 
+    mapping(address => bool) private _frozen;
     mapping(address => bool) private _blacklisted;
 
     uint256 public silverPricePerGram; // in INR, 6 decimals
     address public priceOracle;
     uint256 public mintCap;
+
     event Mint(address indexed to, uint256 grams, uint256 priceAtMint);
     event Burn(address indexed from, uint256 grams);
+    event Blacklisted(address indexed account, bool status);
+    event AddressFrozen(address indexed account, bool status);
+    event MintCapUpdated(uint256 newCap);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() { _disableInitializers(); }
@@ -36,6 +44,7 @@ contract ESilver is
     function initialize(
         address admin,
         address minter,
+        address treasury,
         uint256 _mintCap,
         uint256 initialSilverPrice
     ) public initializer {
@@ -46,6 +55,7 @@ contract ESilver is
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(MINTER_ROLE, minter);
+        _grantRole(TREASURY_ROLE, treasury);
         _grantRole(UPGRADER_ROLE, admin);
         mintCap = _mintCap;
 
@@ -70,33 +80,44 @@ contract ESilver is
         silverPricePerGram = newPrice;
     }
 
-    function blacklist(address account, bool status)
-        external onlyRole(DEFAULT_ADMIN_ROLE)
-    {
+    function blacklist(address account, bool status)external onlyRole(BLACKLISTER_ROLE){
         _blacklisted[account] = status;
+        emit Blacklisted(account, status);
+    }
+
+    function freeze(address account, bool status) external onlyRole(FREEZER_ROLE){
+        _frozen[account] = status;
+        emit AddressFrozen(account, status);
+    }
+
+    function setMintCap(uint256 newCap) external onlyRole(TREASURY_ROLE){
+        mintCap = newCap;
+        emit MintCapUpdated(newCap);
+    }
+
+    function isBlacklisted(address a) external view returns (bool){
+        return _blacklisted[a];
+    }
+
+    function isFrozen(address a) external view returns (bool){
+        return _frozen[a];
     }
 
     function pause()   external onlyRole(DEFAULT_ADMIN_ROLE) { _pause(); }
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) { _unpause(); }
 
-    function _beforeTokenTransfer(
-    address from,
-    address to,
-    uint256 amount
-)
-    internal
-    override(ERC20Upgradeable, ERC20PausableUpgradeable)
-{
-    if (from != address(0)) {
-        require(!_blacklisted[from], "ESilver: restricted");
-    }
+    function _beforeTokenTransfer(address from,address to,uint256 amount) internal
+    override(ERC20Upgradeable, ERC20PausableUpgradeable){
+        if (from != address(0)) {
+            require(!_blacklisted[from], "ESilver: restricted");
+            require(!_frozen[from], "ESilver: sender frozen");
+        }
 
-    if (to != address(0)) {
-        require(!_blacklisted[to], "ESilver: restricted");
+        if (to != address(0)) {
+            require(!_blacklisted[to], "ESilver: restricted");
+        }
+        super._beforeTokenTransfer(from, to, amount);
     }
-
-    super._beforeTokenTransfer(from, to, amount);
-}
 
     function _authorizeUpgrade(address) internal override onlyRole(UPGRADER_ROLE) {}
     function decimals() public pure override returns (uint8) { return 6; }

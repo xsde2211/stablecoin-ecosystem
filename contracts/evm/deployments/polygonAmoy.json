@@ -1,0 +1,13 @@
+{
+  "network": "polygonAmoy",
+  "chainId": "80002",
+  "deployedBy": "0x6854406766C7C0769ed637A8c690Bf461C145E72",
+  "deployedAt": "2026-05-29T22:30:22.246Z",
+  "contracts": {
+    "INRX": "0x71CecBcE2f0367D53c84db75a0e95fa0dCBd880C",
+    "EGold": "0x627BA49b931E3fd58cB37568015189CF1Bb914c0",
+    "ESilver": "0x9Bd524FCb8a31Ec4725D6969E378F42E367613c3",
+    "Treasury": "0x31208Aa3F94F0E2Ef1C7ABC62eaD653efDD3Ae85",
+    "Bridge": "0x31857916Fb61c02634ceA9A72184351e141226f7"
+  }
+}
