@@ -1,0 +1,40 @@
+{
+  "network": "sepolia",
+  "chainId": "11155111",
+  "deployedBy": "0x6854406766C7C0769ed637A8c690Bf461C145E72",
+  "deployedAt": "2026-06-06T13:57:37.597Z",
+  "contracts": {
+    "INRX": "0x51A5F24560547f587999c331788aC495D40d95ba",
+    "EGold": "0x815bF86a0b353b0853c45E92dD5447A344a3dA62",
+    "ESilver": "0x90Eec2B99d92dEbf8719AACFB173b32Dcf791D88",
+    "OracleManager": "0xfeA54211216c212fe4dEfEA9E01CA6673CCb48d1",
+    "ReserveVault": "0x1621C08E66aC3fB88dA2D438FC6F01D5dCE1db7D",
+    "TreasuryTimelock": "0xD4048cbaC528fFE3B1D05Fbc73Fb1e41c0BB74F9",
+    "BridgeV2": "0x519ecfeBA19B5EDE6Cfd9eD7B6d33513924957Db"
+  },
+  "roles": {
+    "signers": [
+      "0xF0C60038efEE679626409886988a4Cc48Fe31680",
+      "0x531D3281bE9Dd146C5721583E4A77E3ff8D04Ed1",
+      "0xA3A08a2A1c907823C13B45b035a634C00119af35"
+    ],
+    "guardian": "0x6854406766C7C0769ed637A8c690Bf461C145E72",
+    "relayer": "0x41c59C9B9fb0f9c134F312abC0276DEacba4F10a",
+    "validators": [
+      "0xF0C60038efEE679626409886988a4Cc48Fe31680",
+      "0x531D3281bE9Dd146C5721583E4A77E3ff8D04Ed1",
+      "0xA3A08a2A1c907823C13B45b035a634C00119af35"
+    ],
+    "custodian": "0x6854406766C7C0769ed637A8c690Bf461C145E72",
+    "auditor": "0x6854406766C7C0769ed637A8c690Bf461C145E72",
+    "oracles": [
+      "0x06B1791eFaCD749E967120dd03C1De43605442A2",
+      "0xe5C5C630B7a681B80E07749b30DDB25bE7C16Df9"
+    ]
+  },
+  "config": {
+    "requiredSignatures": 2,
+    "requiredValidators": 2,
+    "timelockDelayHours": 12
+  }
+}

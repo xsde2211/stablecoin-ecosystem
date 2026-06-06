@@ -2,8 +2,13 @@ import { ethers, upgrades } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
 import * as dotenv from "dotenv";
-dotenv.config();
+dotenv.config({
+  path: path.resolve(__dirname, "../../.env"),
+});
 
+console.log(process.env.SIGNER_1_ADDRESS);
+console.log(process.env.SIGNER_2_ADDRESS);
+console.log(process.env.SIGNER_3_ADDRESS);
 // ─── Token IDs (match what contracts use) ─────────────────────────────────
 const TOKEN_INRX  = ethers.keccak256(ethers.toUtf8Bytes("INRX"));
 const TOKEN_EGOLD = ethers.keccak256(ethers.toUtf8Bytes("EGOLD"));
@@ -86,7 +91,7 @@ async function main() {
   const EGold_F = await ethers.getContractFactory("EGold");
   const egold   = await upgrades.deployProxy(
     EGold_F,
-    [deployer.address, deployer.address, EGOLD_MINT_CAP, GOLD_INITIAL_PRICE],
+    [deployer.address, deployer.address, deployer.address, EGOLD_MINT_CAP, GOLD_INITIAL_PRICE],
     { initializer: "initialize", kind: "uups" }
   );
   await egold.waitForDeployment();
@@ -98,7 +103,7 @@ async function main() {
   const ESilver_F = await ethers.getContractFactory("ESilver");
   const eslvr     = await upgrades.deployProxy(
     ESilver_F,
-    [deployer.address, deployer.address, ESLVR_MINT_CAP, SILVER_INITIAL_PRICE],
+    [deployer.address, deployer.address, deployer.address, ESLVR_MINT_CAP, SILVER_INITIAL_PRICE],
     { initializer: "initialize", kind: "uups" }
   );
   await eslvr.waitForDeployment();
@@ -111,7 +116,7 @@ async function main() {
 
   console.log("\n[2/6] Deploying OracleManager...");
   const Oracle_F  = await ethers.getContractFactory("OracleManager");
-  const oracleMgr = await Oracle_F.deploy(deployer.address);
+  const oracleMgr:any = await Oracle_F.deploy(deployer.address);
   await oracleMgr.waitForDeployment();
   deployed.OracleManager = await oracleMgr.getAddress();
   console.log("  ✓ OracleManager:", deployed.OracleManager);

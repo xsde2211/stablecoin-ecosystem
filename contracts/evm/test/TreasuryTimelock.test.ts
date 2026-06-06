@@ -204,23 +204,37 @@ describe("TreasuryTimelock", function () {
 
   describe("Daily Mint Limits", function () {
     it("enforces daily mint limit", async function () {
-      const DAILY_LIMIT = ethers.parseUnits("1000", 6);
-      await treasury.connect(admin).setDailyMintLimit(TOKEN_INRX, DAILY_LIMIT);
 
-      // First mint — 600 INRX
-      const amount1 = ethers.parseUnits("600", 6);
-      await treasury.connect(signer1).propose(TOKEN_INRX, 0, user1.address, amount1, "first");
-      await treasury.connect(signer2).sign(0n);
-      await time.increase(TIMELOCK_DELAY + 1);
-      await treasury.execute(0n);
+    const now = await time.latest();
+    const nextDayStart = Math.floor(now / 86400 + 1) * 86400;
+    await time.increaseTo(nextDayStart + 3600); 
 
-      // Second mint — 600 INRX (would exceed daily 1000 limit)
-      const amount2 = ethers.parseUnits("600", 6);
-      await treasury.connect(signer1).propose(TOKEN_INRX, 0, user1.address, amount2, "second");
-      await treasury.connect(signer2).sign(1n);
-      await time.increase(TIMELOCK_DELAY + 1);
-      await expect(treasury.execute(1n))
-        .to.be.revertedWith("Timelock: daily mint limit exceeded");
+    const DAILY_LIMIT = ethers.parseUnits("1000", 6);
+    await treasury.connect(admin).setDailyMintLimit(TOKEN_INRX, DAILY_LIMIT);
+
+    const amount1 = ethers.parseUnits("600", 6);
+    const amount2 = ethers.parseUnits("600", 6);
+
+    await treasury.connect(signer1).propose(
+    TOKEN_INRX, 0, user1.address, amount1, "first"
+    );
+    await treasury.connect(signer2).sign(0n);
+
+    await time.increase(3600);
+
+    await treasury.connect(signer1).propose(
+    TOKEN_INRX, 0, user1.address, amount2, "second"
+    );
+    await treasury.connect(signer2).sign(1n);
+
+    await time.increase(11 * 3600 + 1);
+    await treasury.execute(0n);
+
+    await time.increase(3600);
+
+    await expect(
+    treasury.execute(1n)
+    ).to.be.revertedWith("Timelock: daily mint limit exceeded");
     });
   });
 });

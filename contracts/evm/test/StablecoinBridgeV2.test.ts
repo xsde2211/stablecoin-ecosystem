@@ -92,8 +92,8 @@ describe("StablecoinBridgeV2", function () {
   describe("Lock tokens (source chain)", function () {
     it("locks tokens correctly", async function () {
       const amount   = ethers.parseUnits("100", 6);
-      const nonce    = Date.now();
-      const deadline = Math.floor(Date.now() / 1000) + 3600;
+      const nonce    = BigInt(await time.latest());
+      const deadline = (await time.latest()) + 3600;
 
       await expect(
         bridge.connect(user1).lock(
@@ -105,19 +105,23 @@ describe("StablecoinBridgeV2", function () {
 
     it("transfers tokens from user to bridge on lock", async function () {
       const amount   = ethers.parseUnits("100", 6);
-      const deadline = Math.floor(Date.now() / 1000) + 3600;
+      const deadline = (await time.latest()) + 3600;
       const balBefore = await mockToken.balanceOf(user1.address);
 
       await bridge.connect(user1).lock(
-        TOKEN_INRX, amount, DST_CHAIN, user2.address, Date.now(), deadline
-      );
-
+      TOKEN_INRX,
+      amount,
+      DST_CHAIN,
+      user2.address,
+      BigInt(await time.latest()),
+      deadline
+    );
       expect(await mockToken.balanceOf(user1.address)).to.equal(balBefore - amount);
       expect(await mockToken.balanceOf(await bridge.getAddress())).to.equal(amount);
     });
 
     it("reverts if deadline passed", async function () {
-      const expiredDeadline = Math.floor(Date.now() / 1000) - 1;
+      const expiredDeadline = (await time.latest()) - 1;
       await expect(
         bridge.connect(user1).lock(
           TOKEN_INRX, ethers.parseUnits("100", 6), DST_CHAIN,
@@ -128,7 +132,7 @@ describe("StablecoinBridgeV2", function () {
 
     it("reverts if token not registered", async function () {
       const FAKE = ethers.keccak256(ethers.toUtf8Bytes("FAKE"));
-      const deadline = Math.floor(Date.now() / 1000) + 3600;
+      const deadline = (await time.latest()) + 3600;
       await expect(
         bridge.connect(user1).lock(FAKE, 100n, DST_CHAIN, user2.address, 1, deadline)
       ).to.be.revertedWith("Bridge: token not registered");
@@ -136,7 +140,7 @@ describe("StablecoinBridgeV2", function () {
 
     it("reverts when paused", async function () {
       await bridge.connect(admin).pause();
-      const deadline = Math.floor(Date.now() / 1000) + 3600;
+      const deadline = (await time.latest()) + 3600;
       await expect(
         bridge.connect(user1).lock(
           TOKEN_INRX, ethers.parseUnits("100", 6), DST_CHAIN,
@@ -149,8 +153,8 @@ describe("StablecoinBridgeV2", function () {
   describe("Mint tokens (destination chain)", function () {
     it("mints tokens with valid validator signatures", async function () {
       const amount   = ethers.parseUnits("100", 6);
-      const nonce    = BigInt(Date.now());
-      const deadline = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const nonce    = BigInt(await time.latest());
+      const deadline = BigInt((await time.latest()) + 3600);
 
       const req = {
         tokenId:    TOKEN_INRX,
@@ -175,7 +179,7 @@ describe("StablecoinBridgeV2", function () {
       const req = {
         tokenId: TOKEN_INRX, from: user1.address, to: user2.address,
         amount: 100n, srcChainId: DST_CHAIN, dstChainId: 999n,
-        nonce: 1n, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
+        nonce: 1n, deadline: BigInt((await time.latest()) + 3600),
       };
       const sigs = await signBridgeRequest(req, [validator1, validator2]);
       await expect(bridge.connect(relayer).mint(req, sigs))
@@ -187,7 +191,7 @@ describe("StablecoinBridgeV2", function () {
         tokenId: TOKEN_INRX, from: user1.address, to: user2.address,
         amount: ethers.parseUnits("100", 6), srcChainId: DST_CHAIN,
         dstChainId: CHAIN_ID, nonce: 42n,
-        deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
+        deadline: BigInt((await time.latest()) + 3600),
       };
       const sigs = await signBridgeRequest(req, [validator1, validator2]);
       await bridge.connect(relayer).mint(req, sigs);
@@ -202,7 +206,7 @@ describe("StablecoinBridgeV2", function () {
       const req = {
         tokenId: TOKEN_INRX, from: user1.address, to: user2.address,
         amount: 100n, srcChainId: DST_CHAIN, dstChainId: CHAIN_ID,
-        nonce: 99n, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
+        nonce: 99n, deadline: BigInt((await time.latest()) + 3600),
       };
       const sigs = await signBridgeRequest(req, [validator1]); // only 1 sig, need 2
       await expect(bridge.connect(relayer).mint(req, sigs))
@@ -213,7 +217,7 @@ describe("StablecoinBridgeV2", function () {
       const req = {
         tokenId: TOKEN_INRX, from: user1.address, to: user2.address,
         amount: 100n, srcChainId: DST_CHAIN, dstChainId: CHAIN_ID,
-        nonce: 100n, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
+        nonce: 100n, deadline: BigInt((await time.latest()) + 3600),
       };
       const sigs = await signBridgeRequest(req, [validator1, validator1]); // same sig twice
       await expect(bridge.connect(relayer).mint(req, sigs))
@@ -224,7 +228,7 @@ describe("StablecoinBridgeV2", function () {
       const req = {
         tokenId: TOKEN_INRX, from: user1.address, to: user2.address,
         amount: 100n, srcChainId: DST_CHAIN, dstChainId: CHAIN_ID,
-        nonce: 200n, deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
+        nonce: 200n, deadline: BigInt((await time.latest()) + 3600),
       };
       const sigs = await signBridgeRequest(req, [validator1, validator2]);
       await expect(bridge.connect(user1).mint(req, sigs)).to.be.reverted;
@@ -232,23 +236,29 @@ describe("StablecoinBridgeV2", function () {
   });
 
   describe("Burn tokens (return path from destination)", function () {
-    it("burns tokens and emits TokensBurned event", async function () {
-      const amount   = ethers.parseUnits("100", 6);
-      const deadline = Math.floor(Date.now() / 1000) + 3600;
+  it("burns tokens and emits TokensBurned event", async function () {
+    const amount   = ethers.parseUnits("100", 6);
+    const nonce    = BigInt(await time.latest());
+    const deadline = (await time.latest()) + 3600;
 
-      await expect(
-        bridge.connect(user1).burn(
-          TOKEN_INRX, amount, DST_CHAIN, user2.address, Date.now(), deadline
-        )
-      ).to.emit(bridge, "TokensBurned");
-    });
+    await expect(
+      bridge.connect(user1).burn(
+        TOKEN_INRX,
+        amount,
+        DST_CHAIN,
+        user2.address,
+        nonce,
+        deadline
+      )
+    ).to.emit(bridge, "TokensBurned");
   });
+});
 
   describe("Unlock tokens (return to source)", function () {
     beforeEach(async function () {
       // Lock some tokens first so bridge has balance to unlock
       const lockAmount = ethers.parseUnits("500", 6);
-      const deadline   = Math.floor(Date.now() / 1000) + 3600;
+      const deadline   = (await time.latest()) + 3600;
       await bridge.connect(user1).lock(
         TOKEN_INRX, lockAmount, DST_CHAIN, user2.address, 1, deadline
       );
@@ -264,7 +274,7 @@ describe("StablecoinBridgeV2", function () {
         srcChainId: CHAIN_ID,
         dstChainId: DST_CHAIN,
         nonce:      300n,
-        deadline:   BigInt(Math.floor(Date.now() / 1000) + 3600),
+        deadline:   BigInt((await time.latest()) + 3600),
       };
       const sigs = await signBridgeRequest(req, [validator1, validator2]);
       const balBefore = await mockToken.balanceOf(user2.address);
@@ -328,7 +338,7 @@ describe("StablecoinBridgeV2", function () {
     it("admin can withdraw stuck tokens when paused", async function () {
       // Lock some tokens first
       const lockAmount = ethers.parseUnits("200", 6);
-      const deadline   = Math.floor(Date.now() / 1000) + 3600;
+      const deadline   = (await time.latest()) + 3600;
       await bridge.connect(user1).lock(
         TOKEN_INRX, lockAmount, DST_CHAIN, user2.address, 999, deadline
       );
