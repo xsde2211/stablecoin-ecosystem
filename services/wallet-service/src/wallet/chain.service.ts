@@ -1,124 +1,123 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ethers }  from 'ethers';
-import { TronWeb } from 'tronweb';
-import {
-  Connection,
-  PublicKey,
-} from '@solana/web3.js';
+import { ethers }             from 'ethers';
+import { TronWeb }            from 'tronweb';
+import { Connection, PublicKey } from '@solana/web3.js';
 
 const ERC20_ABI = [
-  'function balanceOf(address) view returns (uint256)',
+  'function balanceOf(address owner) view returns (uint256)',
   'function transfer(address to, uint256 amount) returns (bool)',
   'function decimals() view returns (uint8)',
+  'function symbol() view returns (string)',
+];
+
+const TRC20_ABI = [
+  { constant:true, inputs:[{name:'_owner',type:'address'}], name:'balanceOf',
+    outputs:[{name:'balance',type:'uint256'}], type:'function' },
+  { constant:false, inputs:[{name:'_to',type:'address'},{name:'_value',type:'uint256'}],
+    name:'transfer', outputs:[{name:'',type:'bool'}], type:'function' },
 ];
 
 @Injectable()
 export class ChainService {
   private readonly logger = new Logger(ChainService.name);
 
-  // RPC providers — initialized once
-  private ethProvider:     ethers.JsonRpcProvider;
-  private bscProvider:     ethers.JsonRpcProvider;
-  private polygonProvider: ethers.JsonRpcProvider;
-  private solanaConn:      Connection;
+  private readonly ethProvider:     ethers.JsonRpcProvider;
+  private readonly bscProvider:     ethers.JsonRpcProvider;
+  private readonly polygonProvider: ethers.JsonRpcProvider;
+  private readonly solanaConn:      Connection;
 
   constructor() {
-    this.ethProvider     = new ethers.JsonRpcProvider(process.env.ETH_RPC);
-    this.bscProvider     = new ethers.JsonRpcProvider(process.env.BSC_RPC);
-    this.polygonProvider = new ethers.JsonRpcProvider(process.env.POLYGON_RPC);
+    this.ethProvider     = new ethers.JsonRpcProvider(process.env.ETH_RPC!);
+    this.bscProvider     = new ethers.JsonRpcProvider(process.env.BSC_RPC!);
+    this.polygonProvider = new ethers.JsonRpcProvider(process.env.POLYGON_RPC!);
     this.solanaConn      = new Connection(process.env.SOLANA_RPC!);
   }
 
-  // ─── Balance fetching ────────────────────────────────────────────
+  // ─── Token contract address lookup ──────────────────────────────────────────
 
-  async getBalance(
-    chain:        string,
-    address:      string,
-    tokenAddress: string,
-  ): Promise<string> {
+  getTokenAddress(chain: string, symbol: string): string {
+    const map: Record<string, Record<string, string>> = {
+      tron: {
+        INRX:  process.env.TRON_INRX_ADDRESS  ?? '',
+        EGOLD: process.env.TRON_EGOLD_ADDRESS  ?? '',
+        ESLVR: process.env.TRON_ESLVR_ADDRESS  ?? '',
+      },
+      ethereum: {
+        INRX:  process.env.ETH_INRX_ADDRESS   ?? '',
+        EGOLD: process.env.ETH_EGOLD_ADDRESS   ?? '',
+        ESLVR: process.env.ETH_ESLVR_ADDRESS   ?? '',
+      },
+      bsc: {
+        INRX:  process.env.BSC_INRX_ADDRESS   ?? '',
+        EGOLD: process.env.BSC_EGOLD_ADDRESS   ?? '',
+        ESLVR: process.env.BSC_ESLVR_ADDRESS   ?? '',
+      },
+      polygon: {
+        INRX:  process.env.POLYGON_INRX_ADDRESS  ?? '',
+        EGOLD: process.env.POLYGON_EGOLD_ADDRESS ?? '',
+        ESLVR: process.env.POLYGON_ESLVR_ADDRESS ?? '',
+      },
+    };
+    return map[chain]?.[symbol] ?? '';
+  }
+
+  // ─── Balance fetching ────────────────────────────────────────────────────────
+
+  async getBalance(chain: string, address: string, tokenAddress: string): Promise<string> {
     try {
       switch (chain) {
-        case 'ethereum': return this.getEVMBalance(this.ethProvider, address, tokenAddress);
-        case 'bsc':      return this.getEVMBalance(this.bscProvider, address, tokenAddress);
+        case 'ethereum': return this.getEVMBalance(this.ethProvider,     address, tokenAddress);
+        case 'bsc':      return this.getEVMBalance(this.bscProvider,     address, tokenAddress);
         case 'polygon':  return this.getEVMBalance(this.polygonProvider, address, tokenAddress);
         case 'tron':     return this.getTRONBalance(address, tokenAddress);
         case 'solana':   return this.getSolanaBalance(address, tokenAddress);
         default:         return '0';
       }
-    } catch (err) {
-      this.logger.error(`Balance fetch failed for ${chain}:${address}`, err);
+    } catch (err: any) {
+      this.logger.error(`Balance fetch failed [${chain}:${address.slice(0,10)}]: ${err.message}`);
       return '0';
     }
   }
 
   private async getEVMBalance(
-    provider:     ethers.JsonRpcProvider,
-    address:      string,
-    tokenAddress: string,
+    provider: ethers.JsonRpcProvider,
+    address:  string,
+    token:    string,
   ): Promise<string> {
-    const contract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-    const balance  = await contract.balanceOf(address);
-    const decimals = await contract.decimals();
+    const contract = new ethers.Contract(token, ERC20_ABI, provider);
+    const [balance, decimals] = await Promise.all([
+      contract.balanceOf(address),
+      contract.decimals(),
+    ]);
     return ethers.formatUnits(balance, decimals);
   }
 
   private async getTRONBalance(address: string, tokenAddress: string): Promise<string> {
     const tronWeb = new TronWeb({
-  fullHost: process.env.TRON_RPC!,
-  headers: {
-    'TRON-PRO-API-KEY': process.env.TRON_API_KEY!,
-  },
-});
-
-tronWeb.setAddress(address);
-
-const contract = await tronWeb.contract(
-[
-  {
-    constant: true,
-    inputs: [
-      {
-        name: '_owner',
-        type: 'address',
-      },
-    ],
-    name: 'balanceOf',
-    outputs: [
-      {
-        name: 'balance',
-        type: 'uint256',
-      },
-    ],
-    stateMutability: 'view',
-    type: 'function',
-  },
-],
-tokenAddress,
-);
-
-const balance = await contract.balanceOf(address).call();
-    return (BigInt(balance.toString()) / BigInt(1_000_000)).toString();
+      fullHost: process.env.TRON_RPC!,
+      headers:  { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+    });
+    tronWeb.setAddress(address);
+    const contract = await tronWeb.contract(TRC20_ABI, tokenAddress);
+    const balance  = await contract.balanceOf(address).call();
+    // All our tokens use 6 decimals
+    return (BigInt(balance.toString()) / 1_000_000n).toString();
   }
 
-  private async getSolanaBalance(
-  walletAddress: string,
-  mintAddress:   string,
-): Promise<string> {
-  try {
-    // Dynamic import fixes the ESM/CJS conflict
-    const splToken = await import('@solana/spl-token');
-
-    const wallet = new PublicKey(walletAddress);
-    const mint   = new PublicKey(mintAddress);
-    const ata    = await splToken.getAssociatedTokenAddress(mint, wallet);
-
-    const info = await this.solanaConn.getTokenAccountBalance(ata);
-    return info.value.uiAmountString ?? '0';
-  } catch {
-    return '0';
+  private async getSolanaBalance(walletAddress: string, mintAddress: string): Promise<string> {
+    try {
+      const splToken = await import('@solana/spl-token');
+      const wallet   = new PublicKey(walletAddress);
+      const mint     = new PublicKey(mintAddress);
+      const ata      = await splToken.getAssociatedTokenAddress(mint, wallet);
+      const info     = await this.solanaConn.getTokenAccountBalance(ata);
+      return info.value.uiAmountString ?? '0';
+    } catch {
+      return '0';
+    }
   }
-}
-  // ─── Token transfers ─────────────────────────────────────────────
+
+  // ─── Token transfer — EVM ────────────────────────────────────────────────────
 
   async sendEVMToken(
     chain:        string,
@@ -133,14 +132,19 @@ const balance = await contract.balanceOf(address).call();
       polygon:  this.polygonProvider,
     };
     const provider = providers[chain];
+    if (!provider) throw new Error(`Unsupported EVM chain: ${chain}`);
+
     const wallet   = ethers.HDNodeWallet.fromPhrase(mnemonic).connect(provider);
     const contract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
     const decimals = await contract.decimals();
     const parsed   = ethers.parseUnits(amount, decimals);
-    const tx       = await contract.transfer(toAddress, parsed);
-    const receipt  = await tx.wait();
+
+    const tx      = await contract.transfer(toAddress, parsed);
+    const receipt = await tx.wait();
     return receipt.hash;
   }
+
+  // ─── Token transfer — TRON ──────────────────────────────────────────────────
 
   async sendTRONToken(
     mnemonic:     string,
@@ -148,44 +152,34 @@ const balance = await contract.balanceOf(address).call();
     tokenAddress: string,
     amount:       string,
   ): Promise<string> {
-    const hdNode   = ethers.HDNodeWallet.fromPhrase(mnemonic);
-    const privKey  = hdNode.privateKey.slice(2);
-    const tronWeb  = new TronWeb({ fullHost: process.env.TRON_RPC!, privateKey: privKey ,headers: {
-    'TRON-PRO-API-KEY': process.env.TRON_API_KEY!,
-  },});
-    const contract = await tronWeb.contract().at(tokenAddress);
-    const amountMicro = BigInt(parseFloat(amount) * 1_000_000).toString();
+    const hdNode  = ethers.HDNodeWallet.fromPhrase(mnemonic);
+    const privKey = hdNode.privateKey.slice(2);
+
+    const tronWeb = new TronWeb({
+      fullHost:   process.env.TRON_RPC!,
+      privateKey: privKey,
+      headers:    { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+    });
+
+    const contract    = await tronWeb.contract().at(tokenAddress);
+    const amountMicro = BigInt(Math.round(parseFloat(amount) * 1_000_000)).toString();
+
     const txId = await contract.transfer(toAddress, amountMicro).send({
       feeLimit: 100_000_000,
     });
+
     return txId;
   }
 
-  // ─── Token contract address lookup ───────────────────────────────
+  // ─── Address derivation helpers ──────────────────────────────────────────────
 
-  getTokenAddress(chain: string, symbol: string): string {
-    const map: Record<string, Record<string, string>> = {
-      tron: {
-        INRX:  process.env.TRON_INRX_ADDRESS!,
-        EGOLD: process.env.TRON_EGOLD_ADDRESS!,
-        ESLVR: process.env.TRON_ESLVR_ADDRESS!,
-      },
-      ethereum: {
-        INRX:  process.env.ETH_INRX_ADDRESS!,
-        EGOLD: process.env.ETH_EGOLD_ADDRESS!,
-        ESLVR: process.env.ETH_ESLVR_ADDRESS!,
-      },
-      bsc: {
-        INRX:  process.env.BSC_INRX_ADDRESS!,
-        EGOLD: process.env.BSC_EGOLD_ADDRESS!,
-        ESLVR: process.env.BSC_ESLVR_ADDRESS!,
-      },
-      polygon: {
-        INRX:  process.env.POLYGON_INRX_ADDRESS!,
-        EGOLD: process.env.POLYGON_EGOLD_ADDRESS!,
-        ESLVR: process.env.POLYGON_ESLVR_ADDRESS!,
-      },
-    };
-    return map[chain]?.[symbol] ?? '';
+  deriveEVMAddress(mnemonic: string): string {
+    return ethers.HDNodeWallet.fromPhrase(mnemonic).address;
+  }
+
+  deriveTRONAddress(mnemonic: string): string {
+    const hdNode = ethers.HDNodeWallet.fromPhrase(mnemonic);
+    const tronWeb = new TronWeb({ fullHost: process.env.TRON_RPC! });
+    return tronWeb.address.fromPrivateKey(hdNode.privateKey.slice(2)) as string;
   }
 }

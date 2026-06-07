@@ -5,14 +5,14 @@ import { WalletController } from './wallet.controller';
 import { WalletService }    from './wallet.service';
 import { KmsService }       from './kms.service';
 import { ChainService }     from './chain.service';
-import { JwtStrategy }      from '../auth/jwt.strategy';  // ← add
+import { JwtStrategy }      from '../auth/jwt.strategy';
 
 @Module({
   imports: [
-    PassportModule.register({ defaultStrategy: 'jwt' }),  // ← add defaultStrategy
+    PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.register({ secret: process.env.JWT_SECRET }),
   ],
   controllers: [WalletController],
-  providers:   [WalletService, KmsService, ChainService, JwtStrategy],  // ← add JwtStrategy
+  providers:   [WalletService, KmsService, ChainService, JwtStrategy],
 })
 export class WalletModule {}

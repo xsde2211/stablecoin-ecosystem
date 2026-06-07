@@ -10,7 +10,7 @@ export class LoginDto {
   @IsString()
   password: string;
 
-  @ApiProperty({ required: false, example: '123456' })
+  @ApiProperty({ required: false, example: '123456', description: 'Required if 2FA is enabled' })
   @IsOptional()
   @IsString()
   @Length(6, 6)
