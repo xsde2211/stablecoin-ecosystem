@@ -110,6 +110,7 @@ async function main() {
   deployed.ESilver = await eslvr.getAddress();
   console.log("  ✓ ESilver:", deployed.ESilver);
 
+  console.log("Deployer: ", deployer.address);
   // ╔══════════════════════════════════════════════╗
   // ║  2. Deploy OracleManager                     ║
   // ╚══════════════════════════════════════════════╝
@@ -147,11 +148,13 @@ async function main() {
       `Either set ORACLE_1_PRIVATE_KEY in .env or set ORACLE_1_ADDRESS=${deployer.address}`
     );
   }
+  
 
   await (await oracleMgr.connect(oracle1Signer).updatePrice(TOKEN_EGOLD, GOLD_INITIAL_PRICE)).wait();
   await (await oracleMgr.connect(oracle1Signer).updatePrice(TOKEN_ESLVR, SILVER_INITIAL_PRICE)).wait();
   console.log("  ✓ Initial prices set via registered oracle:", oracle1Signer.address);
 
+  console.log("Deployer: ", deployer.address);
   // ╔══════════════════════════════════════════════╗
   // ║  3. Deploy ReserveVault                      ║
   // ╚══════════════════════════════════════════════╝
@@ -175,6 +178,7 @@ async function main() {
   await (await reserveVault.grantRole(AUDITOR_ROLE,   AUDITOR)).wait();
   console.log("  ✓ Roles configured");
 
+  console.log("Deployer: ", deployer.address);
   // ╔══════════════════════════════════════════════╗
   // ║  4. Deploy TreasuryTimelock                  ║
   // ╚══════════════════════════════════════════════╝
@@ -192,9 +196,18 @@ async function main() {
   console.log("  ✓ TreasuryTimelock:", deployed.TreasuryTimelock);
 
   // Register all 3 tokens in treasury
-  await (await treasury.registerToken(TOKEN_INRX,  deployed.INRX)).wait();
-  await (await treasury.registerToken(TOKEN_EGOLD, deployed.EGold)).wait();
-  await (await treasury.registerToken(TOKEN_ESLVR, deployed.ESilver)).wait();
+  const tx4 = await treasury.registerToken(TOKEN_INRX, deployed.INRX);
+  console.log("registerToken tx hash:",tx4.hash);
+  await tx4.wait(1);
+  console.log("registerToken done");
+  const tx5 = await treasury.registerToken(TOKEN_EGOLD, deployed.EGold);
+  console.log("registerToken tx hash:",tx5.hash);
+  await tx5.wait(1);
+  console.log("registerToken done");
+  const tx6 = await treasury.registerToken(TOKEN_ESLVR, deployed.ESilver);
+  console.log("registerToken tx hash:",tx6.hash);
+  await tx6.wait(1);
+  console.log("registerToken done");
 
   // Set daily mint limits
   await (await treasury.setDailyMintLimit(TOKEN_INRX,  INRX_DAILY_MINT)).wait();
@@ -202,6 +215,7 @@ async function main() {
   await (await treasury.setDailyMintLimit(TOKEN_ESLVR, ESLVR_DAILY_MINT)).wait();
   console.log("  ✓ Daily limits set");
 
+  console.log("Deployer: ", deployer.address);
 
   // ╔══════════════════════════════════════════════╗
   // ║  5. Deploy StablecoinBridgeV2               ║
@@ -221,14 +235,24 @@ async function main() {
   console.log("  ✓ StablecoinBridgeV2:", deployed.BridgeV2);
 
   // Register all tokens in bridge
-  await (await bridge.registerToken(TOKEN_INRX,  deployed.INRX)).wait();
-  await (await bridge.registerToken(TOKEN_EGOLD, deployed.EGold)).wait();
-  await (await bridge.registerToken(TOKEN_ESLVR, deployed.ESilver)).wait();
+  const tx = await bridge.registerToken(TOKEN_INRX, deployed.INRX);
+  console.log("registerToken tx hash:",tx.hash);
+  await tx.wait(1);
+  console.log("registerToken done");
+  const tx2 = await bridge.registerToken(TOKEN_EGOLD, deployed.EGold);
+  console.log("registerToken tx hash:",tx2.hash);
+  await tx2.wait(1);
+  console.log("registerToken done");
+  const tx3 = await bridge.registerToken(TOKEN_ESLVR, deployed.ESilver);
+  console.log("registerToken tx hash:",tx3.hash);
+  await tx3.wait(1);
+  console.log("registerToken done");
 
   // Add relayer
   await (await bridge.addRelayer(RELAYER)).wait();
   console.log("  ✓ Relayer added:", RELAYER);
 
+  console.log("Deployer: ", deployer.address);
   // ╔══════════════════════════════════════════════╗
   // ║  6. Configure Token Roles                   ║
   // ╚══════════════════════════════════════════════╝
@@ -261,6 +285,7 @@ async function main() {
     console.log(`  ✓ ${contract}: Treasury(MINTER+BURNER+TREASURY), Bridge(MINTER+BURNER), FREEZER=${FREEZER}, BLACKLISTER=${BLACKLISTER}`);
   }
 
+  console.log("Deployer: ", deployer.address);
   // ─── Save deployment output ────────────────────────────────────────────
 
   const output = {

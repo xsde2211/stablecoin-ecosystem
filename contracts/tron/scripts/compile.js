@@ -1,62 +1,76 @@
+const fs = require("fs");
 const path = require("path");
-const fs = require("fs-extra");
 const solc = require("solc");
 
 const contractsDir = path.join(__dirname, "../contracts");
 const buildDir = path.join(__dirname, "../build/contracts");
 
-fs.ensureDirSync(buildDir);
+if (!fs.existsSync(buildDir))
+    fs.mkdirSync(buildDir, { recursive: true });
 
-const contractFiles = fs.readdirSync(contractsDir);
+function findImports(importPath) {
+    try {
+        if (importPath.startsWith("@")) {
+            const p = path.join(__dirname, "../node_modules", importPath);
+            return { contents: fs.readFileSync(p, "utf8") };
+        }
 
-for (const file of contractFiles) {
-  if (!file.endsWith(".sol")) continue;
-
-  const filePath = path.join(contractsDir, file);
-  const source = fs.readFileSync(filePath, "utf8");
-
-  const input = {
-    language: "Solidity",
-    sources: {
-      [file]: {
-        content: source,
-      },
-    },
-    settings: {
-      optimizer: {
-        enabled: true,
-        runs: 200,
-      },
-      outputSelection: {
-        "*": {
-          "*": ["abi", "evm.bytecode"],
-        },
-      },
-    },
-  };
-
-  const output = JSON.parse(solc.compile(JSON.stringify(input)));
-
-  if (output.errors) {
-    for (const error of output.errors) {
-      console.log(error.formattedMessage);
+        const p = path.join(contractsDir, importPath);
+        return { contents: fs.readFileSync(p, "utf8") };
+    } catch (e) {
+        return { error: "File not found" };
     }
-  }
+}
 
-  const contracts = output.contracts[file];
+const input = {
+    language: "Solidity",
+    sources: {},
+    settings: {
+        optimizer: {
+            enabled: true,
+            runs: 200
+        },
+        outputSelection: {
+            "*": {
+                "*": ["abi", "evm.bytecode"]
+            }
+        }
+    }
+};
 
-  for (const contractName in contracts) {
-    const artifact = contracts[contractName];
+for (const file of fs.readdirSync(contractsDir)) {
+    if (file.endsWith(".sol")) {
+        input.sources[file] = {
+            content: fs.readFileSync(
+                path.join(contractsDir, file),
+                "utf8"
+            )
+        };
+    }
+}
 
-    fs.writeJsonSync(
-      path.join(buildDir, `${contractName}.json`),
-      {
-        abi: artifact.abi,
-        bytecode: artifact.evm.bytecode.object,
-      },
-      { spaces: 2 }
-    );
+const output = JSON.parse(
+    solc.compile(
+        JSON.stringify(input),
+        { import: findImports }
+    )
+);
 
-    console.log(`Compiled: ${contractName}`);
-  }
+for (const file in output.contracts) {
+    for (const name in output.contracts[file]) {
+
+        const contract = output.contracts[file][name];
+
+        fs.writeFileSync(
+            path.join(buildDir, `${name}.json`),
+            JSON.stringify({
+                abi: contract.abi,
+                bytecode:
+                    "0x" +
+                    contract.evm.bytecode.object
+            }, null, 2)
+        );
+
+        console.log(`✓ ${name}`);
+    }
 }

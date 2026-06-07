@@ -1,243 +1,361 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+
 /**
- * @title TronBridge — Lock/Mint · Burn/Unlock for TRON
- * @notice Locks tokens on TRON, signals EVM chains to mint.
- *         Receives unlock signals from EVM chains to release locked tokens.
- * @dev Compiled for TVM. No OpenZeppelin — pure Solidity for TVM compatibility.
+ * @title TronBridge
+ * @notice TRON-specific bridge. Compiled for TVM by TronBox.
+ *         Tokens (INRX, EGold, ESilver) are the same contracts as EVM —
+ *         compiled from contracts/evm/contracts/ by TronBox.
+ *         This contract ONLY handles TRON bridge logic.
+ *
+ * Flow:
+ *   TRON→EVM: user calls lock()  → relayer detects → mints on EVM
+ *   EVM→TRON: relayer calls mint() after EVM burn → tokens appear on TRON
+ *   TRON→EVM return: user calls burn() → relayer unlocks on EVM
+ *   EVM→TRON return: relayer calls unlock() after EVM lock
  */
-contract TronBridge {
+contract TronBridge is AccessControl, ReentrancyGuard, Pausable {
 
-    address public owner;
-    address public relayer;
-    bool    public paused;
+    // ─── Roles ────────────────────────────────────────────────────
+    bytes32 public constant VALIDATOR_ROLE = keccak256("VALIDATOR_ROLE");
+    bytes32 public constant RELAYER_ROLE   = keccak256("RELAYER_ROLE");
+    bytes32 public constant PAUSER_ROLE    = keccak256("PAUSER_ROLE");
 
+    // ─── Config ───────────────────────────────────────────────────
     uint256 public requiredValidators;
-    uint256 public validatorCount;
 
-    // nonce => processed (replay protection)
+    // token symbol → token contract address on TRON
+    mapping(string  => address) public tokenContracts;
+    string[] public registeredTokens;
+
+    // replay protection: nonce key → processed
     mapping(bytes32 => bool) public processedNonces;
 
-    // validator address => is active
-    mapping(address => bool) public validators;
+    // validator tracking
+    address[] public validatorList;
+    mapping(address => bool) public isActiveValidator;
 
-    // token symbol => token contract address
-    mapping(string => address) public tokenContracts;
+    // daily transfer limits per token (0 = disabled)
+    mapping(string => uint256) public dailyLimit;
+    mapping(string => uint256) public dailyTransferred;
+    mapping(string => uint256) public lastTransferDay;
 
     // ─── Events ───────────────────────────────────────────────────
+    event TokenRegistered(string symbol, address contractAddr);
 
     event TokensLocked(
-        address indexed sender,
         string  indexed token,
+        address indexed sender,
         uint256 amount,
         string  dstChain,
-        address dstAddress,
+        address dstRecipient,
         uint256 nonce,
         uint256 deadline
     );
-
-    event TokensUnlocked(
-        address indexed recipient,
+    event TokensMinted(
         string  indexed token,
+        address indexed recipient,
         uint256 amount,
         string  srcChain,
-        bytes32 srcNonce
+        bytes32 nonceKey
+    );
+    event TokensBurned(
+        string  indexed token,
+        address indexed sender,
+        uint256 amount,
+        string  srcChain,
+        address srcRecipient,
+        uint256 nonce,
+        uint256 deadline
+    );
+    event TokensUnlocked(
+        string  indexed token,
+        address indexed recipient,
+        uint256 amount,
+        string  srcChain,
+        bytes32 nonceKey
     );
 
     event ValidatorAdded(address indexed validator);
     event ValidatorRemoved(address indexed validator);
-    event TokenRegistered(string symbol, address contractAddr);
-    event Paused(bool status);
-
-    // ─── Modifiers ────────────────────────────────────────────────
-
-    modifier onlyOwner()   { require(msg.sender == owner,   "Not owner");   _; }
-    modifier onlyRelayer() { require(msg.sender == relayer || msg.sender == owner, "Not relayer"); _; }
-    modifier notPaused()   { require(!paused, "Bridge paused"); _; }
+    event DailyLimitSet(string token, uint256 limit);
 
     // ─── Constructor ──────────────────────────────────────────────
+    constructor(
+        uint256   _requiredValidators,
+        address[] memory initialValidators,
+        address   admin
+    ) {
+        require(_requiredValidators > 0, "Bridge: zero threshold");
+        require(initialValidators.length >= _requiredValidators, "Bridge: not enough validators");
 
-    constructor(uint256 _requiredValidators) {
-        owner              = msg.sender;
-        relayer            = msg.sender;
         requiredValidators = _requiredValidators;
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(PAUSER_ROLE, admin);
+
+        for (uint i = 0; i < initialValidators.length; i++) {
+            _addValidator(initialValidators[i]);
+        }
     }
 
-    // ─── Token Registration ───────────────────────────────────────
+    // ─── Token registration ───────────────────────────────────────
 
     function registerToken(string calldata symbol, address contractAddr)
-        external onlyOwner
+        external onlyRole(DEFAULT_ADMIN_ROLE)
     {
+        require(contractAddr != address(0), "Bridge: zero address");
+        if (tokenContracts[symbol] == address(0)) {
+            registeredTokens.push(symbol);
+        }
         tokenContracts[symbol] = contractAddr;
         emit TokenRegistered(symbol, contractAddr);
     }
 
-    // ─── Lock (TRON → other chain) ────────────────────────────────
+    // ─── LOCK — TRON → other chain ────────────────────────────────
 
-    /**
-     * @notice User calls this to start a bridge transfer FROM TRON.
-     *         Tokens are locked in this contract.
-     *         Backend relayer watches this event and mints on destination.
-     */
     function lock(
         string  calldata token,
         uint256 amount,
         string  calldata dstChain,
-        address dstAddress,
+        address dstRecipient,
         uint256 nonce,
         uint256 deadline
-    ) external notPaused {
-        require(block.timestamp <= deadline,            "Bridge: deadline passed");
-        require(tokenContracts[token] != address(0),   "Bridge: token not registered");
-        require(amount > 0,                             "Bridge: zero amount");
+    ) external nonReentrant whenNotPaused {
+        require(tokenContracts[token] != address(0), "Bridge: token not registered");
+        require(block.timestamp <= deadline,          "Bridge: deadline passed");
+        require(amount > 0,                           "Bridge: zero amount");
+        require(dstRecipient != address(0),           "Bridge: zero recipient");
 
-        ITRC20 tokenContract = ITRC20(tokenContracts[token]);
+        _checkDailyLimit(token, amount);
+
         require(
-            tokenContract.transferFrom(msg.sender, address(this), amount),
+            IERC20(tokenContracts[token]).transferFrom(msg.sender, address(this), amount),
             "Bridge: transfer failed"
         );
 
-        emit TokensLocked(
-            msg.sender,
-            token,
-            amount,
-            dstChain,
-            dstAddress,
-            nonce,
-            deadline
-        );
+        emit TokensLocked(token, msg.sender, amount, dstChain, dstRecipient, nonce, deadline);
     }
 
-    // ─── Unlock (other chain → TRON) ──────────────────────────────
+    // ─── MINT — other chain → TRON (incoming tokens) ──────────────
 
-    /**
-     * @notice Relayer calls this after collecting validator signatures.
-     *         Releases locked tokens to the recipient on TRON.
-     */
-    function unlock(
-        address recipient,
+    function mintTokens(
         string  calldata token,
+        address recipient,
         uint256 amount,
         string  calldata srcChain,
         bytes32 srcNonce,
         bytes[] calldata signatures
-    ) external onlyRelayer notPaused {
-        // Replay protection
-        require(!processedNonces[srcNonce], "Bridge: already processed");
+    ) external nonReentrant whenNotPaused onlyRole(RELAYER_ROLE) {
+        require(tokenContracts[token] != address(0), "Bridge: token not registered");
+        require(!processedNonces[srcNonce],           "Bridge: already processed");
 
-        // Verify validator signatures
         bytes32 msgHash = keccak256(abi.encodePacked(
-            recipient,
-            token,
-            amount,
-            srcChain,
-            srcNonce
+            token, recipient, amount, srcChain, srcNonce
         ));
         _verifySignatures(msgHash, signatures);
 
-        // Mark as processed
         processedNonces[srcNonce] = true;
 
-        // Release tokens
-        ITRC20 tokenContract = ITRC20(tokenContracts[token]);
-        require(
-            tokenContract.transfer(recipient, amount),
-            "Bridge: release failed"
-        );
-
-        emit TokensUnlocked(recipient, token, amount, srcChain, srcNonce);
+        IMintable(tokenContracts[token]).mint(recipient, amount, "bridge_mint");
+        emit TokensMinted(token, recipient, amount, srcChain, srcNonce);
     }
 
-    // ─── Signature Verification ───────────────────────────────────
+    // ─── BURN — TRON → other chain (return path) ──────────────────
 
-    function _verifySignatures(
-        bytes32 msgHash,
+    function burn(
+        string  calldata token,
+        uint256 amount,
+        string  calldata srcChain,
+        address srcRecipient,
+        uint256 nonce,
+        uint256 deadline
+    ) external nonReentrant whenNotPaused {
+        require(tokenContracts[token] != address(0), "Bridge: token not registered");
+        require(block.timestamp <= deadline,          "Bridge: deadline passed");
+        require(amount > 0,                           "Bridge: zero amount");
+        require(srcRecipient != address(0),           "Bridge: zero recipient");
+
+        IBurnable(tokenContracts[token]).burn(msg.sender, amount, "bridge_burn");
+
+        emit TokensBurned(token, msg.sender, amount, srcChain, srcRecipient, nonce, deadline);
+    }
+
+    // ─── UNLOCK — release locked tokens on TRON ───────────────────
+
+    function unlock(
+        string  calldata token,
+        address recipient,
+        uint256 amount,
+        string  calldata srcChain,
+        bytes32 srcNonce,
         bytes[] calldata signatures
-    ) internal view {
+    ) external nonReentrant whenNotPaused onlyRole(RELAYER_ROLE) {
+        require(tokenContracts[token] != address(0), "Bridge: token not registered");
+        require(!processedNonces[srcNonce],           "Bridge: already processed");
+
+        bytes32 msgHash = keccak256(abi.encodePacked(
+            token, recipient, amount, srcChain, srcNonce
+        ));
+        _verifySignatures(msgHash, signatures);
+
+        processedNonces[srcNonce] = true;
+
         require(
-            signatures.length >= requiredValidators,
-            "Bridge: insufficient signatures"
+            IERC20(tokenContracts[token]).transfer(recipient, amount),
+            "Bridge: unlock failed"
         );
+        emit TokensUnlocked(token, recipient, amount, srcChain, srcNonce);
+    }
 
-        address[] memory seen = new address[](signatures.length);
+    // ─── Pause ────────────────────────────────────────────────────
 
-        for (uint256 i = 0; i < signatures.length; i++) {
-            address signer = _recoverSigner(msgHash, signatures[i]);
-            require(validators[signer], "Bridge: invalid validator");
+    function pause()   external onlyRole(PAUSER_ROLE) { _pause();   }
+    function unpause() external onlyRole(PAUSER_ROLE) { _unpause(); }
 
-            // Check no duplicate signers
-            for (uint256 j = 0; j < i; j++) {
+    function emergencyWithdraw(string calldata token, address to, uint256 amount)
+        external onlyRole(DEFAULT_ADMIN_ROLE) whenPaused
+    {
+        require(to != address(0), "Bridge: zero address");
+        IERC20(tokenContracts[token]).transfer(to, amount);
+    }
+
+    // ─── Validator management ─────────────────────────────────────
+
+    function addValidator(address validator)
+        external onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        _addValidator(validator);
+    }
+
+    function _addValidator(address validator) internal {
+        require(validator != address(0),       "Bridge: zero address");
+        require(!isActiveValidator[validator], "Bridge: already validator");
+        isActiveValidator[validator] = true;
+        validatorList.push(validator);
+        _grantRole(VALIDATOR_ROLE, validator);
+        emit ValidatorAdded(validator);
+    }
+
+    function removeValidator(address validator)
+        external onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(isActiveValidator[validator], "Bridge: not a validator");
+        require(
+            _activeValidatorCount() - 1 >= requiredValidators,
+            "Bridge: would break threshold"
+        );
+        isActiveValidator[validator] = false;
+        _revokeRole(VALIDATOR_ROLE, validator);
+        emit ValidatorRemoved(validator);
+    }
+
+    function updateRequiredValidators(uint256 newRequired)
+        external onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(newRequired > 0, "Bridge: zero required");
+        require(newRequired <= _activeValidatorCount(), "Bridge: exceeds count");
+        requiredValidators = newRequired;
+    }
+
+    function addRelayer(address relayer)
+        external onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        _grantRole(RELAYER_ROLE, relayer);
+    }
+
+    // ─── Daily limit ──────────────────────────────────────────────
+
+    function setDailyLimit(string calldata token, uint256 limit)
+        external onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        dailyLimit[token] = limit;
+        emit DailyLimitSet(token, limit);
+    }
+
+    function _checkDailyLimit(string memory token, uint256 amount) internal {
+        uint256 limit = dailyLimit[token];
+        if (limit == 0) return;
+        uint256 today = block.timestamp / 1 days;
+        if (lastTransferDay[token] != today) {
+            dailyTransferred[token] = 0;
+            lastTransferDay[token]  = today;
+        }
+        require(
+            dailyTransferred[token] + amount <= limit,
+            "Bridge: daily limit exceeded"
+        );
+        dailyTransferred[token] += amount;
+    }
+
+    // ─── Signature verification ───────────────────────────────────
+
+    function _verifySignatures(bytes32 msgHash, bytes[] calldata sigs) internal view {
+        require(sigs.length >= requiredValidators, "Bridge: insufficient sigs");
+        address[] memory seen = new address[](sigs.length);
+        for (uint i = 0; i < sigs.length; i++) {
+            address signer = _recover(msgHash, sigs[i]);
+            require(isActiveValidator[signer], "Bridge: invalid validator");
+            for (uint j = 0; j < i; j++) {
                 require(seen[j] != signer, "Bridge: duplicate signer");
             }
             seen[i] = signer;
         }
     }
 
-    function _recoverSigner(bytes32 hash, bytes memory sig)
+    function _recover(bytes32 hash, bytes memory sig)
         internal pure returns (address)
     {
         require(sig.length == 65, "Bridge: invalid sig length");
-
-        bytes32 r;
-        bytes32 s;
-        uint8   v;
-
+        bytes32 r; bytes32 s; uint8 v;
         assembly {
             r := mload(add(sig, 32))
             s := mload(add(sig, 64))
             v := byte(0, mload(add(sig, 96)))
         }
-
         if (v < 27) v += 27;
-
-        bytes32 prefixedHash = keccak256(
-            abi.encodePacked("\x19TRON Signed Message:\n32", hash)
+        // TRON uses same prefix as Ethereum
+        bytes32 prefixed = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", hash)
         );
-
-        return ecrecover(prefixedHash, v, r, s);
+        return ecrecover(prefixed, v, r, s);
     }
 
-    // ─── Validator Management ─────────────────────────────────────
+    // ─── Views ────────────────────────────────────────────────────
 
-    function addValidator(address validator) external onlyOwner {
-        require(!validators[validator], "Already a validator");
-        validators[validator] = true;
-        validatorCount++;
-        emit ValidatorAdded(validator);
+    function _activeValidatorCount() internal view returns (uint256 n) {
+        for (uint i = 0; i < validatorList.length; i++) {
+            if (isActiveValidator[validatorList[i]]) n++;
+        }
     }
 
-    function removeValidator(address validator) external onlyOwner {
-        require(validators[validator], "Not a validator");
-        require(validatorCount - 1 >= requiredValidators, "Would break threshold");
-        validators[validator] = false;
-        validatorCount--;
-        emit ValidatorRemoved(validator);
+    function getActiveValidators() external view returns (address[] memory out) {
+        uint256 n = _activeValidatorCount();
+        out = new address[](n);
+        uint256 idx = 0;
+        for (uint i = 0; i < validatorList.length; i++) {
+            if (isActiveValidator[validatorList[i]]) out[idx++] = validatorList[i];
+        }
     }
 
-    function setRequiredValidators(uint256 _required) external onlyOwner {
-        require(_required > 0 && _required <= validatorCount, "Invalid threshold");
-        requiredValidators = _required;
-    }
-
-    // ─── Admin ────────────────────────────────────────────────────
-
-    function setPaused(bool status)       external onlyOwner { paused = status; emit Paused(status); }
-    function setRelayer(address _relayer) external onlyOwner { relayer = _relayer; }
-    function transferOwnership(address newOwner) external onlyOwner { owner = newOwner; }
-
-    // Emergency: withdraw stuck tokens (owner only)
-    function emergencyWithdraw(string calldata token, address to, uint256 amount)
-        external onlyOwner
-    {
-        ITRC20(tokenContracts[token]).transfer(to, amount);
+    function getRegisteredTokens() external view returns (string[] memory) {
+        return registeredTokens;
     }
 }
 
-// ─── Minimal TRC20 interface ──────────────────────────────────────────────────
-
-interface ITRC20 {
-    function transfer(address to, uint256 amount)     external returns (bool);
+interface IERC20 {
+    function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function balanceOf(address account)               external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+interface IMintable {
+    function mint(address to, uint256 amount, string calldata reason) external;
+}
+
+interface IBurnable {
+    function burn(address from, uint256 amount, string calldata reason) external;
 }

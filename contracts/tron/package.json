@@ -1,15 +1,24 @@
 {
   "name": "@ecosystem/contracts-tron",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "description": "TRON contracts — TronBridge + token compilation via TronBox",
   "scripts": {
-    "compile": "node scripts/compile.js",
+    "prebuild": "node scripts/sync-tokens.js",
+    "compile": "tronbox compile",
     "deploy:shasta": "node scripts/deploy-tron.js",
-    "deploy:mainnet": "node scripts/deploy-tron.js"
+    "deploy:nile": "node scripts/deploy-tron.js",
+    "deploy:mainnet": "node scripts/deploy-tron.js",
+    "test": "node scripts/test-runner.js"
   },
   "dependencies": {
     "dotenv": "^16.0.0",
-    "tronweb": "^6.0.0",
-    "solc": "^0.8.20",
-    "fs-extra": "^11.2.0"
+    "tronweb": "^6.0.0"
+  },
+  "devDependencies": {
+    "@openzeppelin/contracts": "4.9.6",
+    "@openzeppelin/contracts-upgradeable": "4.9.6",
+    "solc": "0.8.20",
+    "tron-solc": "^0.4.24",
+    "tronbox": "4.7.0"
   }
 }
