@@ -1,17 +1,18 @@
-import { Module }          from '@nestjs/common';
-import { PassportModule }  from '@nestjs/passport';
-import { JwtModule }       from '@nestjs/jwt';
+import { Module }         from '@nestjs/common';
+import { PassportModule } from '@nestjs/passport';
+import { JwtModule }      from '@nestjs/jwt';
 import { WalletController } from './wallet.controller';
 import { WalletService }    from './wallet.service';
 import { KmsService }       from './kms.service';
 import { ChainService }     from './chain.service';
+import { JwtStrategy }      from '../auth/jwt.strategy';  // ← add
 
 @Module({
   imports: [
-    PassportModule,
+    PassportModule.register({ defaultStrategy: 'jwt' }),  // ← add defaultStrategy
     JwtModule.register({ secret: process.env.JWT_SECRET }),
   ],
   controllers: [WalletController],
-  providers:   [WalletService, KmsService, ChainService],
+  providers:   [WalletService, KmsService, ChainService, JwtStrategy],  // ← add JwtStrategy
 })
 export class WalletModule {}

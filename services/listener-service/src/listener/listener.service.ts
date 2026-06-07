@@ -200,9 +200,9 @@ export class ListenerService implements OnModuleInit {
       } catch (err) {
         this.logger.error(`Polling error on ${chain.name}:`, err);
       }
-    }, 15_000); // every 15 seconds
+    }, 240000); // every 4 minutes
 
-    this.logger.log(`Polling started for ${chain.name} every 15s`);
+    this.logger.log(`Polling started for ${chain.name} every 4 minute`);
   }
 
   // ─── TRON polling (no WebSocket standard) ────────────────────────────────

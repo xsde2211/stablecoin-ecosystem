@@ -7,11 +7,10 @@
     "dev":          "node tools/scripts/dev.cjs",
     "dev:infra":    "docker compose up -d postgres redis kafka zookeeper",
     "dev:stop":     "docker compose down",
-    "dev:all":      "pnpm dev:infra && node tools/scripts/dev.cjs",
-    "dev:web": "pnpm --filter web dev",
-    "db:migrate": "pnpm --filter @ecosystem/config prisma migrate dev",
-    "db:generate": "pnpm --filter @ecosystem/config prisma generate",
-    "db:studio": "pnpm --filter @ecosystem/config prisma studio"
+    "dev:all":   "docker compose up -d postgres redis kafka zookeeper && node tools/scripts/dev.cjs",
+    "db:migrate":"pnpm --filter @ecosystem/config prisma:migrate",
+    "db:generate":"pnpm --filter @ecosystem/config prisma:generate",
+    "db:studio": "pnpm --filter @ecosystem/config prisma:studio"
   },
   "devEngines": {
     "packageManager": {

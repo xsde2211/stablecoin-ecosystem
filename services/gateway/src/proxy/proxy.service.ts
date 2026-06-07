@@ -68,9 +68,15 @@ export class ProxyService {
       );
       return response.data;
     } catch (err: any) {
-      // Forward the downstream service's error status and message
       const status  = err?.response?.status  ?? HttpStatus.BAD_GATEWAY;
       const message = err?.response?.data    ?? 'Service unavailable';
+
+      // 304 is NOT an error — it means "use cached response"
+      // axios throws on 304 because it's a redirect-like code
+      if (status === 304) {
+        return err?.response?.data ?? {};
+      }
+
       this.logger.error(`Proxy error [${service}] ${method} ${path}: ${status}`);
       throw new HttpException(message, status);
     }

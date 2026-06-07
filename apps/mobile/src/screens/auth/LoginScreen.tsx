@@ -70,9 +70,34 @@ export function LoginScreen({ navigation }: any) {
             />
           </View>
 
-          <TouchableOpacity style={styles.forgotRow}>
-            <Text style={styles.forgotText}>Forgot password?</Text>
-          </TouchableOpacity>
+          // In LoginScreen.tsx, replace the forgotRow TouchableOpacity:
+<TouchableOpacity
+  style={styles.forgotRow}
+  onPress={() => Alert.alert(
+    'Reset Password',
+    'Enter your email address and we will send you a reset link.',
+    [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Send Reset Link',
+        onPress: async () => {
+          if (!email) {
+            Alert.alert('Error', 'Enter your email address first');
+            return;
+          }
+          try {
+            // For now show success — backend endpoint to be added
+            Alert.alert('Email Sent', `Password reset instructions sent to ${email}`);
+          } catch {
+            Alert.alert('Error', 'Could not send reset email');
+          }
+        }
+      }
+    ]
+  )}
+>
+  <Text style={styles.forgotText}>Forgot password?</Text>
+</TouchableOpacity>
 
           <Button label="Sign In" onPress={handleLogin} loading={loading} />
 

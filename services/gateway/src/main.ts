@@ -3,27 +3,34 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule }       from './app.module';
 import helmet              from 'helmet';
-import compression    from 'compression';
+import compression         from 'compression';
+import { networkInterfaces } from 'os';
 
 async function bootstrap() {
   const app    = await NestFactory.create(AppModule);
   const logger = new Logger('Gateway');
 
-  // Security headers
-  app.use(helmet());
-
-  // Gzip compression
+  // Compression first
   app.use(compression());
 
-  // CORS — allow your frontend origins
+  // Helmet with relaxed settings for development
+  // Disabling the problematic headers that break Swagger + mobile access
+  app.use(helmet({
+    crossOriginOpenerPolicy:    false,  // was blocking Swagger
+    crossOriginEmbedderPolicy:  false,  // was blocking Swagger assets
+    contentSecurityPolicy:      false,  // was blocking CDN resources in Swagger
+    hsts:                       false,  // was forcing HTTPS redirect
+  }));
+
+  // CORS — allow everything in development
   app.enableCors({
-    origin:      process.env.ALLOWED_ORIGINS?.split(',') ?? ['http://localhost:3000'],
-    credentials: true,
-    methods:     ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    origin:         true,
+    credentials:    true,
+    methods:        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
   });
 
-  // Validate all incoming request bodies
+  // Request validation
   app.useGlobalPipes(new ValidationPipe({
     whitelist:            true,
     forbidNonWhitelisted: true,
@@ -31,12 +38,16 @@ async function bootstrap() {
   }));
 
   // Swagger docs
+  const localIP = getLocalIP();
+  const port    = process.env.PORT ?? 3001;
+
   const config = new DocumentBuilder()
     .setTitle('Stablecoin Ecosystem API')
-    .setDescription('e₹ / eGold / eSilver cross-chain stablecoin platform — API Gateway')
+    .setDescription('e₹ / eGold / eSilver cross-chain stablecoin platform')
     .setVersion('1.0')
     .addBearerAuth()
-    .addServer('http://localhost:3001', 'Local Development')
+    .addServer(`http://localhost:${port}`,    'Localhost')
+    .addServer(`http://${localIP}:${port}`,   'Local Network (for mobile)')
     .build();
 
   SwaggerModule.setup(
@@ -45,15 +56,30 @@ async function bootstrap() {
     SwaggerModule.createDocument(app, config),
     {
       swaggerOptions: {
-        persistAuthorization: true,    // keeps JWT token between page refreshes
+        persistAuthorization: true,
         displayRequestDuration: true,
       },
     }
   );
 
-  const port = process.env.PORT ?? 3001;
-  await app.listen(port);
-  logger.log(`Gateway running on http://localhost:${port}`);
-  logger.log(`Swagger docs at http://localhost:${port}/docs`);
+  await app.listen(port, '0.0.0.0');
+
+  logger.log(`Gateway        → http://localhost:${port}`);
+  logger.log(`Swagger docs   → http://localhost:${port}/docs`);
+  logger.log(`Mobile access  → http://${localIP}:${port}`);
+  logger.log(`Health check   → http://${localIP}:${port}/health`);
 }
+
+function getLocalIP(): string {
+  const nets = networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of (nets[name] ?? [])) {
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
 bootstrap();

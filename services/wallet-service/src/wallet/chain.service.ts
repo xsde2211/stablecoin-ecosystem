@@ -63,31 +63,40 @@ export class ChainService {
   }
 
   private async getTRONBalance(address: string, tokenAddress: string): Promise<string> {
-    const tronWeb  = new TronWeb({ fullHost: process.env.TRON_RPC! });
-    const contract = await tronWeb.contract(
-    [
+    const tronWeb = new TronWeb({
+  fullHost: process.env.TRON_RPC!,
+  headers: {
+    'TRON-PRO-API-KEY': process.env.TRON_API_KEY!,
+  },
+});
+
+tronWeb.setAddress(address);
+
+const contract = await tronWeb.contract(
+[
+  {
+    constant: true,
+    inputs: [
       {
-        constant: true,
-        inputs: [
-          {
-            name: '_owner',
-            type: 'address',
-          },
-        ],
-        name: 'balanceOf',
-        outputs: [
-          {
-            name: 'balance',
-            type: 'uint256',
-          },
-        ],
-        stateMutability: 'view',
-        type: 'function',
+        name: '_owner',
+        type: 'address',
       },
     ],
-    tokenAddress,
-  );
-    const balance = await contract.balanceOf(address).call();
+    name: 'balanceOf',
+    outputs: [
+      {
+        name: 'balance',
+        type: 'uint256',
+      },
+    ],
+    stateMutability: 'view',
+    type: 'function',
+  },
+],
+tokenAddress,
+);
+
+const balance = await contract.balanceOf(address).call();
     return (BigInt(balance.toString()) / BigInt(1_000_000)).toString();
   }
 
@@ -141,7 +150,9 @@ export class ChainService {
   ): Promise<string> {
     const hdNode   = ethers.HDNodeWallet.fromPhrase(mnemonic);
     const privKey  = hdNode.privateKey.slice(2);
-    const tronWeb  = new TronWeb({ fullHost: process.env.TRON_RPC!, privateKey: privKey });
+    const tronWeb  = new TronWeb({ fullHost: process.env.TRON_RPC!, privateKey: privKey ,headers: {
+    'TRON-PRO-API-KEY': process.env.TRON_API_KEY!,
+  },});
     const contract = await tronWeb.contract().at(tokenAddress);
     const amountMicro = BigInt(parseFloat(amount) * 1_000_000).toString();
     const txId = await contract.transfer(toAddress, amountMicro).send({

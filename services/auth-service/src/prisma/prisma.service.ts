@@ -1,3 +1,4 @@
+// src/prisma/prisma.service.ts
 import {
   Injectable,
   OnModuleInit,
@@ -16,7 +17,6 @@ export class PrismaService
   constructor() {
     super({
       log: [
-        { emit: 'event', level: 'query' },
         { emit: 'stdout', level: 'error' },
         { emit: 'stdout', level: 'warn' },
       ],
@@ -24,8 +24,38 @@ export class PrismaService
   }
 
   async onModuleInit() {
-    await this.$connect();
-    this.logger.log('Database connected');
+    await this.connectWithRetry();
+  }
+
+  private async connectWithRetry(
+    maxAttempts = 10,
+    delayMs     = 3000,
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.$connect();
+        this.logger.log('Database connected');
+        return;
+      } catch (err: any) {
+        const isLast = attempt === maxAttempts;
+        if (isLast) {
+          this.logger.error(
+            `Database connection failed after ${maxAttempts} attempts`,
+            err.message,
+          );
+          throw err;
+        }
+        this.logger.warn(
+          `Database not ready (attempt ${attempt}/${maxAttempts}). ` +
+          `Retrying in ${delayMs / 1000}s...`
+        );
+        await this.sleep(delayMs);
+      }
+    }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   async onModuleDestroy() {

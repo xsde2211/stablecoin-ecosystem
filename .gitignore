@@ -6,7 +6,16 @@ cache
 typechain-types
 /docs
 /infra
+ENV_GUIDE.md
+sync-tokens.js
+build
+deployments
 
+packages.zip
+services
+tools
+
+.vscode
 contracts/evm/.openzeppelin
 
 contracts/bridge/.openzeppelin

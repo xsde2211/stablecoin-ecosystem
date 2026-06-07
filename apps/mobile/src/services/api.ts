@@ -47,6 +47,8 @@ class ApiService {
   login     = (d: any) => this.client.post('/auth/login',    d).then(r => r.data);
   logout    = (d: any) => this.client.post('/auth/logout',   d).then(r => r.data);
   getMe     = ()       => this.client.get('/auth/me').then(r => r.data);
+  setup2FA   = ()              => this.client.post('/auth/2fa/setup').then(r => r.data);
+  verify2FA  = (token: string) => this.client.post('/auth/2fa/verify', { token }).then(r => r.data);
 
   // Wallet
   createWallet  = ()    => this.client.post('/wallet/create').then(r => r.data);

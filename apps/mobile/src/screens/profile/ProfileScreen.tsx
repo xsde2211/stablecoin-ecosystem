@@ -89,10 +89,11 @@ export function ProfileScreen({ navigation }: any) {
               value={kycStatus==='APPROVED'?'Verified':'Tap to verify'}
               onPress={() => navigation.navigate('KYC')} />
             <SettingRow icon="🔐" label="Two-Factor Authentication"
-              value="Protect your account"
-              onPress={() => Alert.alert('2FA','2FA setup coming soon')} />
+              value={user?.twoFaEnabled ? 'Enabled' : 'Disabled — tap to enable'}
+              onPress={() => navigation.navigate('TwoFA')} />
+
             <SettingRow icon="🔑" label="Change Password"
-              onPress={() => Alert.alert('Password','Change password coming soon')} />
+              onPress={() => navigation.navigate('ChangePassword')} />
           </View>
         </View>
 
@@ -112,8 +113,8 @@ export function ProfileScreen({ navigation }: any) {
           <Text style={styles.sectionTitle}>Wallet</Text>
           <View style={styles.settingsCard}>
             <SettingRow icon="💾" label="Backup Seed Phrase"
-              value="Keep it safe"
-              onPress={() => Alert.alert('Backup','Export seed phrase coming soon')} />
+              value="Tap to view — keep it safe"
+              onPress={() => navigation.navigate('CreateWallet')} />
             <SettingRow icon="📋" label="Transaction History"
               onPress={() => navigation.navigate('Transactions')} />
             <SettingRow icon="🌐" label="Networks"
