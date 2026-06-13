@@ -25,6 +25,10 @@ model User {
   wallets         Wallet[]
   kycApplications KycApplication[]
   auditLogs       AuditLog[]
+  notifications   Notification[]
+  fraudFlags      FraudFlag[]
+  merchant        Merchant?
+  bridgeTransfers BridgeTransfer[]
 
   @@index([email])
   @@index([phone])
@@ -34,12 +38,14 @@ model User {
 enum UserRole {
   USER
   MERCHANT
+  COMPLIANCE
   ADMIN
   SUPER_ADMIN
 }
 
 enum KycStatus {
   PENDING
+  NOT_SUBMITTED
   SUBMITTED
   APPROVED
   REJECTED
@@ -51,7 +57,7 @@ model Wallet {
   chain         String // ethereum | tron | bsc | polygon | solana
   address       String
   encPrivateKey String // AES-256 encrypted, KMS-managed DEK
-  createdAt     DateTime @default(now())
+  createdAt    DateTime @default(now())
 
   user         User             @relation(fields: [userId], references: [id])
   transactions Transaction[]
@@ -121,9 +127,11 @@ model BridgeTransfer {
   nonce         String
   deadline      DateTime
   status        BridgeStatus @default(PENDING)
+  type          BridgeType   @default(LOCK_MINT)
   confirmations Int          @default(0)
   createdAt     DateTime     @default(now())
 
+  user                User                 @relation(fields: [userId], references: [id])
   wallet              Wallet?              @relation("sender", fields: [walletId], references: [id])
   validatorSignatures ValidatorSignature[]
 
@@ -142,6 +150,11 @@ enum BridgeStatus {
   EXPIRED
 }
 
+enum BridgeType {
+  LOCK_MINT
+  BURN_UNLOCK
+}
+
 model ValidatorSignature {
   id            String   @id @default(uuid())
   transferId    String
@@ -157,20 +170,28 @@ model ValidatorSignature {
 model KycApplication {
   id             String    @id @default(uuid())
   userId         String
-  provider       String // digilocker | hyperverge | onfido
+  provider       String // manual | hyperverge | digilocker | aadhaar_xml
   status         KycStatus
   documentType   String?
   documentRef    String? // provider reference ID
+  fullName       String?
+  dateOfBirth    DateTime?
+  address        String?
   verifiedAt     DateTime?
+  reviewedAt     DateTime?
+  reviewedBy     String?
   rejectedReason String?
   createdAt      DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
 }
 
 model Treasury {
   id              String   @id @default(uuid())
-  token           String   @unique // INRX | EGOLD | ESILVER
+  token           String   @unique // INRX | EGOLD | ESLVR
   totalSupply     Decimal  @db.Decimal(36, 18)
   reserveAmount   Decimal  @db.Decimal(36, 18)
   collateralRatio Decimal  @db.Decimal(8, 4)
@@ -182,41 +203,52 @@ model Treasury {
 model ReserveEntry {
   id         String    @id @default(uuid())
   treasuryId String
-  assetType  String // INR_BANK | GOLD_VAULT | SILVER_VAULT | T_BILL
+  assetType  String // INR_BANK_DEPOSIT | GOLD_VAULT | SILVER_VAULT | GOVT_SECURITIES | USDT_COLLATERAL
   amount     Decimal   @db.Decimal(36, 18)
   custodian  String
   proofUrl   String?
+  active     Boolean   @default(true)
   verifiedAt DateTime?
   createdAt  DateTime  @default(now())
 
   treasury Treasury @relation(fields: [treasuryId], references: [id])
+
+  @@index([treasuryId])
 }
 
 model Merchant {
-  id                String   @id @default(uuid())
-  userId            String   @unique
-  name              String
-  apiKey            String   @unique @default(uuid())
-  webhookUrl        String?
-  settlementAddress String
-  settlementChain   String   @default("tron")
-  isActive          Boolean  @default(true)
-  createdAt         DateTime @default(now())
+  id                 String   @id @default(uuid())
+  userId             String   @unique
+  businessName       String
+  businessEmail      String?
+  gstin              String?
+  name               String?  // legacy/back-compat alias for businessName
+  apiKey             String   @unique @default(uuid())
+  apiSecretHash      String?
+  webhookUrl         String?
+  settlementAddress  String
+  settlementChain    String   @default("tron")
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
 
+  user            User             @relation(fields: [userId], references: [id])
   paymentRequests PaymentRequest[]
 }
 
 model PaymentRequest {
-  id         String        @id @default(uuid())
-  merchantId String
-  amount     Decimal       @db.Decimal(36, 18)
-  token      String
-  reference  String
-  status     PaymentStatus @default(PENDING)
-  expiresAt  DateTime
-  paidAt     DateTime?
-  txHash     String?
-  createdAt  DateTime      @default(now())
+  id          String        @id @default(uuid())
+  merchantId  String
+  amount      Decimal       @db.Decimal(36, 18)
+  token       String
+  reference   String?
+  description String?
+  webhookUrl  String?
+  status      PaymentStatus @default(PENDING)
+  expiresAt   DateTime
+  paidAt      DateTime?
+  txHash      String?
+  paidOnChain String?
+  createdAt   DateTime      @default(now())
 
   merchant  Merchant   @relation(fields: [merchantId], references: [id])
   qrPayment QrPayment?
@@ -272,6 +304,58 @@ enum AmlStatus {
   CLEARED
   ESCALATED
   REPORTED
+}
+
+model FraudFlag {
+  id              String   @id @default(uuid())
+  userId          String
+  actionType      String   // SEND | RECEIVE | BRIDGE | PAYMENT
+  amount          Decimal  @db.Decimal(36, 18)
+  token           String
+  toAddress       String?
+  chain           String?
+  riskScore       Int
+  flags           String   // comma-separated flag codes
+  status          String   @default("PENDING") // PENDING | CONFIRMED_FRAUD | FALSE_POSITIVE | RESOLVED
+  resolutionNotes String?
+  resolvedBy      String?
+  resolvedAt      DateTime?
+  createdAt       DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+}
+
+model BlacklistedAddress {
+  id        String   @id @default(uuid())
+  address   String
+  chain     String
+  reason    String
+  addedBy   String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([address, chain])
+  @@index([active])
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  type      String    // KYC_APPROVED | KYC_REJECTED | SYSTEM | ...
+  title     String
+  body      String
+  data      String?   // JSON-encoded extra payload
+  read      Boolean   @default(false)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([userId, read])
 }
 
 model AuditLog {
