@@ -1,65 +1,82 @@
 import {
-  Injectable,
-  BadRequestException,
-  NotFoundException,
-  Logger,
+  Injectable, BadRequestException,
+  NotFoundException, Logger,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
-import { Queue } from 'bull';
-import { ethers } from 'ethers';
-import { TronWeb } from 'tronweb';
-import { PrismaService } from '../prisma/prisma.service';
-import { RedisService } from '../redis/redis.service';
-import { InitiateBridgeDto, BurnBridgeDto, ValidatorSignatureDto } from './dto/bridge.dto';
-import { CHAIN_CONFIGS, EVM_CHAINS, getTokenId } from './chain.config';
-import { BRIDGE_V2_ABI, ERC20_ABI } from './bridge.abi';
+import { Queue }       from 'bull';
+import { ethers }      from 'ethers';
+import { TronWeb }     from 'tronweb';
+import { PrismaService }      from '../prisma/prisma.service';
+import { RedisService }       from '../redis/redis.service';
+import { InitiateBridgeDto }  from './dto/initiate-bridge.dto';
+import { BurnBridgeDto }      from './dto/burn-bridge.dto';
 
-const REQUIRED_CONFIRMATIONS = 2; // matches requiredValidators in deployed contracts
+// Updated BridgeV2 ABI — includes lock, burn, unlock, mint
+const BRIDGE_V2_ABI = [
+  // Lock: user → bridge on source chain
+  'function lock(bytes32 tokenId, uint256 amount, uint256 dstChainId, address dstRecipient, uint256 nonce, uint256 deadline)',
+  // Burn: user burns bridged tokens on destination to return
+  'function burn(bytes32 tokenId, uint256 amount, uint256 srcChainId, address srcRecipient, uint256 nonce, uint256 deadline)',
+  // Mint: relayer mints on destination after validators sign
+  'function mintTokens(bytes32 tokenId, address recipient, uint256 amount, string srcChain, bytes32 srcNonce, bytes[] signatures)',
+  // Unlock: relayer unlocks on source after burn on destination
+  'function unlock(bytes32 tokenId, address recipient, uint256 amount, uint256 srcChainId, bytes32 nonceKey, bytes[] signatures)',
+  'function paused() view returns (bool)',
+  'event TokensLocked(bytes32 indexed tokenId, address indexed from, uint256 amount, uint256 dstChainId, address dstRecipient, uint256 nonce, uint256 deadline)',
+  'event TokensMinted(bytes32 indexed tokenId, address indexed to, uint256 amount, uint256 srcChainId, bytes32 nonceKey)',
+  'event TokensBurned(bytes32 indexed tokenId, address indexed from, uint256 amount, uint256 srcChainId, address srcRecipient, uint256 nonce, uint256 deadline)',
+  'event TokensUnlocked(bytes32 indexed tokenId, address indexed to, uint256 amount, uint256 dstChainId, bytes32 nonceKey)',
+];
 
 @Injectable()
 export class BridgeService {
   private readonly logger = new Logger(BridgeService.name);
 
+  // EVM chain IDs
+  private readonly chainIds: Record<string, bigint> = {
+    ethereum: 11155111n, // Sepolia testnet
+    bsc:      97n,       // BSC testnet
+    polygon:  80002n,    // Polygon Amoy testnet
+    tron:     728126428n,
+  };
+
+  // Token IDs (keccak256 of token symbol — must match contract)
+  private readonly tokenIds: Record<string, string> = {
+    INRX:  ethers.keccak256(ethers.toUtf8Bytes('INRX')),
+    EGOLD: ethers.keccak256(ethers.toUtf8Bytes('EGOLD')),
+    ESLVR: ethers.keccak256(ethers.toUtf8Bytes('ESLVR')),
+  };
+
   constructor(
     private prisma: PrismaService,
-    private redis: RedisService,
+    private redis:  RedisService,
     @InjectQueue('bridge') private bridgeQueue: Queue,
   ) {}
 
-  // ─── Initiate (Lock) ──────────────────────────────────────────
+  // ─── Initiate (LOCK flow: srcChain → dstChain) ─────────────────────────────
 
-  /**
-   * Called by frontend when user wants to bridge tokens.
-   * Records the transfer intent and queues the lock transaction.
-   *
-   * NOTE: The actual lock() tx on-chain is called by the RELAYER
-   * after user has approved the bridge contract to spend their tokens.
-   * This endpoint creates the transfer record and returns the data
-   * the frontend needs to call lock() directly, OR queues a relayer-assisted lock.
-   */
-  async initiate(userId: string, srcWalletAddress: string, dto: InitiateBridgeDto) {
+  async initiate(userId: string, dto: InitiateBridgeDto) {
     if (dto.srcChain === dto.dstChain) {
       throw new BadRequestException('Source and destination chains must differ');
     }
-    if (!CHAIN_CONFIGS[dto.srcChain] || !CHAIN_CONFIGS[dto.dstChain]) {
-      throw new BadRequestException(`Unsupported chain: ${dto.srcChain} or ${dto.dstChain}`);
+
+    // Get user wallet address for srcChain
+    const wallet = await this.prisma.wallet.findUnique({
+      where: { userId_chain: { userId, chain: dto.srcChain } },
+    });
+    if (!wallet) {
+      throw new BadRequestException(`No wallet found for chain: ${dto.srcChain}. Create a wallet first.`);
     }
 
     const nonce    = Date.now();
     const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour
-
-    // Validate amount
-    const amountNum = parseFloat(dto.amount);
-    if (isNaN(amountNum) || amountNum <= 0) {
-      throw new BadRequestException('Invalid amount');
-    }
 
     const transfer = await this.prisma.bridgeTransfer.create({
       data: {
         userId,
         srcChain:   dto.srcChain,
         dstChain:   dto.dstChain,
-        srcAddress: srcWalletAddress,
+        srcAddress: wallet.address,
         dstAddress: dto.dstAddress,
         amount:     dto.amount,
         token:      dto.token,
@@ -69,56 +86,35 @@ export class BridgeService {
       },
     });
 
-    // Queue relayer-side lock (for custodial wallets)
-    // For non-custodial, user calls lock() directly and we just track
+    // Queue the lock transaction
     await this.bridgeQueue.add(
       'lock-tokens',
       {
-        transferId:       transfer.id,
+        transferId:   transfer.id,
         userId,
-        srcWalletAddress,
-        srcChain:         dto.srcChain,
-        dstChain:         dto.dstChain,
-        token:            dto.token,
-        amount:           dto.amount,
-        dstAddress:       dto.dstAddress,
+        srcChain:     dto.srcChain,
+        dstChain:     dto.dstChain,
+        token:        dto.token,
+        amount:       dto.amount,
+        dstAddress:   dto.dstAddress,
+        walletAddress:wallet.address,
         nonce,
         deadline,
       },
-      { attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
+      { attempts:3, backoff:{ type:'exponential', delay:5000 } },
     );
 
-    this.logger.log(`Bridge initiated: ${transfer.id} — ${dto.amount} ${dto.token} ${dto.srcChain}→${dto.dstChain}`);
-
-    // Return transfer + data for frontend to call lock() itself if non-custodial
-    const srcConfig = CHAIN_CONFIGS[dto.srcChain];
-    const tokenId   = getTokenId(dto.token);
-    const dstChainId = CHAIN_CONFIGS[dto.dstChain]?.chainId ?? 0;
-
-    return {
-      transfer,
-      lockCalldata: {
-        bridgeAddress: srcConfig.bridgeAddress,
-        tokenId,
-        amount:        ethers.parseUnits(dto.amount, 6).toString(),
-        dstChainId,
-        dstRecipient:  dto.dstAddress,
-        nonce:         nonce.toString(),
-        deadline:      deadline.toString(),
-      },
-    };
+    this.logger.log(`Bridge initiated: ${transfer.id} — ${dto.srcChain}→${dto.dstChain}`);
+    return transfer;
   }
 
-  // ─── Burn (Reverse bridge) ────────────────────────────────────
+  // ─── Burn (BURN flow: user burns on dstChain to return to srcChain) ─────────
 
-  /**
-   * User wants to return bridged tokens back to the original chain.
-   * Creates a burn transfer record; user calls burn() on-chain.
-   */
-  async initiateBurn(userId: string, dstWalletAddress: string, dto: BurnBridgeDto) {
-    if (dto.srcChain === dto.dstChain) {
-      throw new BadRequestException('Chains must differ');
-    }
+  async initiateBurn(userId: string, dto: BurnBridgeDto) {
+    const wallet = await this.prisma.wallet.findUnique({
+      where: { userId_chain: { userId, chain: dto.chain } },
+    });
+    if (!wallet) throw new BadRequestException(`No wallet for chain: ${dto.chain}`);
 
     const nonce    = Date.now();
     const deadline = Math.floor(Date.now() / 1000) + 3600;
@@ -127,310 +123,193 @@ export class BridgeService {
       data: {
         userId,
         srcChain:   dto.srcChain,
-        dstChain:   dto.dstChain,
+        dstChain:   dto.chain,
         srcAddress: dto.srcRecipient,
-        dstAddress: dstWalletAddress,
+        dstAddress: wallet.address,
         amount:     dto.amount,
         token:      dto.token,
         nonce:      nonce.toString(),
         deadline:   new Date(deadline * 1000),
         status:     'PENDING',
+        type:       'BURN_UNLOCK',
       },
     });
 
     await this.bridgeQueue.add(
       'burn-tokens',
-      { transferId: transfer.id, userId, dstWalletAddress, ...dto, nonce, deadline },
-      { attempts: 3, backoff: { type: 'exponential', delay: 5000 } },
-    );
-
-    const dstConfig = CHAIN_CONFIGS[dto.dstChain];
-    const tokenId   = getTokenId(dto.token);
-    const srcChainId = CHAIN_CONFIGS[dto.srcChain]?.chainId ?? 0;
-
-    return {
-      transfer,
-      burnCalldata: {
-        bridgeAddress: dstConfig.bridgeAddress,
-        tokenId,
-        amount:       ethers.parseUnits(dto.amount, 6).toString(),
-        srcChainId,
+      {
+        transferId:   transfer.id,
+        userId,
+        chain:        dto.chain,
+        srcChain:     dto.srcChain,
+        token:        dto.token,
+        amount:       dto.amount,
         srcRecipient: dto.srcRecipient,
-        nonce:        nonce.toString(),
-        deadline:     deadline.toString(),
+        walletAddress:wallet.address,
+        nonce,
+        deadline,
       },
-    };
-  }
-
-  // ─── Validator signature collection ──────────────────────────
-
-  /**
-   * Validators call this endpoint with their signature for a transfer.
-   * When requiredValidators threshold is met, relayer executes mint/unlock.
-   */
-  async submitValidatorSignature(dto: ValidatorSignatureDto) {
-    const transfer = await this.prisma.bridgeTransfer.findUnique({
-      where:   { id: dto.transferId },
-      include: { validatorSignatures: true },
-    });
-    if (!transfer) throw new NotFoundException('Transfer not found');
-    if (!['PENDING', 'LOCKED'].includes(transfer.status)) {
-      throw new BadRequestException(`Transfer status ${transfer.status} does not accept signatures`);
-    }
-
-    // Idempotent — skip duplicate validator
-    const already = transfer.validatorSignatures.find(
-      s => s.validatorAddr.toLowerCase() === dto.validatorAddress.toLowerCase(),
-    );
-    if (already) return { message: 'Already submitted', transfer };
-
-    await this.prisma.validatorSignature.create({
-      data: {
-        transferId:    dto.transferId,
-        validatorAddr: dto.validatorAddress,
-        signature:     dto.signature,
-      },
-    });
-
-    const totalSigs = transfer.validatorSignatures.length + 1;
-
-    if (totalSigs >= REQUIRED_CONFIRMATIONS) {
-      await this.prisma.bridgeTransfer.update({
-        where: { id: dto.transferId },
-        data:  {
-          status:        'SIGNATURES_COLLECTED',
-          confirmations: totalSigs,
-        },
-      });
-      // Queue relayer to execute mint/unlock on destination
-      await this.bridgeQueue.add(
-        'execute-mint',
-        { transferId: dto.transferId },
-        { attempts: 5, backoff: { type: 'exponential', delay: 10000 } },
-      );
-      this.logger.log(`Signatures collected for ${dto.transferId} — queuing mint`);
-    } else {
-      await this.prisma.bridgeTransfer.update({
-        where: { id: dto.transferId },
-        data:  { confirmations: totalSigs },
-      });
-    }
-
-    return { message: 'Signature accepted', signaturesCollected: totalSigs, required: REQUIRED_CONFIRMATIONS };
-  }
-
-  // ─── Execute Mint (called by relayer via queue) ───────────────
-
-  async executeMint(transferId: string) {
-    const transfer = await this.prisma.bridgeTransfer.findUnique({
-      where:   { id: transferId },
-      include: { validatorSignatures: true },
-    });
-    if (!transfer) throw new NotFoundException('Transfer not found');
-    if (transfer.status !== 'SIGNATURES_COLLECTED') {
-      throw new BadRequestException('Transfer not ready for mint');
-    }
-
-    const signatures = transfer.validatorSignatures.map(s => s.signature);
-    const dstConfig  = CHAIN_CONFIGS[transfer.dstChain];
-    const srcConfig  = CHAIN_CONFIGS[transfer.srcChain];
-
-    if (!dstConfig) throw new BadRequestException(`Unsupported destination chain: ${transfer.dstChain}`);
-
-    let dstTxHash: string;
-
-    if (dstConfig.isEvm) {
-      dstTxHash = await this.executeMintEvm(transfer, signatures, dstConfig, srcConfig);
-    } else {
-      dstTxHash = await this.executeMintTron(transfer, signatures);
-    }
-
-    await this.prisma.bridgeTransfer.update({
-      where: { id: transferId },
-      data:  { status: 'COMPLETED', dstTxHash },
-    });
-
-    this.logger.log(`Bridge mint completed: ${dstTxHash}`);
-    return { txHash: dstTxHash };
-  }
-
-  private async executeMintEvm(transfer: any, signatures: string[], dstConfig: any, srcConfig: any): Promise<string> {
-    const rpcUrl  = process.env[dstConfig.rpcEnvKey];
-    if (!rpcUrl) throw new Error(`Missing RPC URL for ${transfer.dstChain}: set ${dstConfig.rpcEnvKey}`);
-
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
-    const relayer  = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY!, provider);
-    const bridge   = new ethers.Contract(dstConfig.bridgeAddress, BRIDGE_V2_ABI, relayer);
-
-    const tokenId    = getTokenId(transfer.token);
-    const srcChainId = srcConfig?.chainId ?? 0;
-    const dstChainId = dstConfig.chainId;
-
-    const req = {
-      tokenId,
-      from:       transfer.srcAddress,
-      to:         transfer.dstAddress,
-      amount:     ethers.parseUnits(transfer.amount, 6),
-      srcChainId,
-      dstChainId,
-      nonce:      BigInt(transfer.nonce),
-      deadline:   Math.floor(transfer.deadline.getTime() / 1000),
-    };
-
-    const tx      = await bridge.mint(req, signatures);
-    const receipt = await tx.wait();
-    return receipt.hash;
-  }
-
-  private async executeMintTron(transfer: any, signatures: string[]): Promise<string> {
-    const tronWeb = new TronWeb({
-      fullHost:   process.env.TRON_RPC!,
-      privateKey: process.env.RELAYER_TRON_PRIVATE_KEY!,
-    });
-    const bridge = await tronWeb.contract().at(CHAIN_CONFIGS.tron.bridgeAddress);
-
-    const amountMicro = BigInt(parseFloat(transfer.amount) * 1_000_000).toString();
-    const srcNonce    = ethers.keccak256(
-      ethers.AbiCoder.defaultAbiCoder().encode(
-        ['uint256', 'uint256'],
-        [transfer.nonce, transfer.nonce],
-      ),
+      { attempts:3, backoff:{ type:'exponential', delay:5000 } },
     );
 
-    const txId = await bridge.mintTokens(
-      transfer.token,
-      transfer.dstAddress,
-      amountMicro,
-      transfer.srcChain,
-      srcNonce,
-      signatures,
-    ).send({ feeLimit: 200_000_000 });
-
-    return txId;
-  }
-
-  // ─── On-chain confirmation (webhook from listener-service) ────
-
-  /**
-   * Called by listener-service when it detects a TokensLocked event.
-   * Updates transfer status to LOCKED and records source tx hash.
-   */
-  async confirmLock(srcTxHash: string, chain: string, nonce: string) {
-    const transfer = await this.prisma.bridgeTransfer.findFirst({
-      where: { nonce, srcChain: chain, status: 'PENDING' },
-    });
-    if (!transfer) {
-      this.logger.warn(`No pending transfer found for nonce=${nonce} chain=${chain}`);
-      return;
-    }
-    await this.prisma.bridgeTransfer.update({
-      where: { id: transfer.id },
-      data:  { status: 'LOCKED', srcTxHash },
-    });
-    this.logger.log(`Transfer ${transfer.id} locked — txHash: ${srcTxHash}`);
+    this.logger.log(`Burn initiated: ${transfer.id} — ${dto.chain}→${dto.srcChain}`);
     return transfer;
   }
 
-  // ─── Get bridge fee estimate ──────────────────────────────────
+  // ─── Get transfer ───────────────────────────────────────────────────────────
 
-  async estimateFee(srcChain: string, dstChain: string, token: string, amount: string) {
-    // Fee structure: 0.1% bridge fee + gas estimate
-    const bridgeFeeRate = 0.001;
-    const amountNum     = parseFloat(amount);
-    const bridgeFee     = (amountNum * bridgeFeeRate).toFixed(6);
-
-    // Gas estimates (in USD equivalent)
-    const gasEstimates: Record<string, number> = {
-      sepolia: 0.5,
-      bsc:     0.1,
-      polygon: 0.05,
-      tron:    0.2,
-    };
-
-    const srcGas = gasEstimates[srcChain] ?? 0.5;
-    const dstGas = gasEstimates[dstChain] ?? 0.5;
-
-    return {
-      bridgeFee,
-      estimatedGasUsd: (srcGas + dstGas).toFixed(2),
-      estimatedTimeMin: srcChain === 'tron' || dstChain === 'tron' ? 5 : 3,
-      youReceive: (amountNum - parseFloat(bridgeFee)).toFixed(6),
-    };
-  }
-
-  // ─── Query ────────────────────────────────────────────────────
-
-  async getTransfer(id: string) {
-    const t = await this.prisma.bridgeTransfer.findUnique({
-      where:   { id },
+  async getTransfer(id: string, userId: string) {
+    const transfer = await this.prisma.bridgeTransfer.findFirst({
+      where:   { id, userId },
       include: { validatorSignatures: true },
     });
-    if (!t) throw new NotFoundException('Transfer not found');
-    return t;
+    if (!transfer) throw new NotFoundException('Transfer not found');
+    return transfer;
   }
+
+  // ─── Get history ────────────────────────────────────────────────────────────
 
   async getUserTransfers(userId: string, page = 1, limit = 20) {
     const skip = (page - 1) * limit;
     const [data, total] = await Promise.all([
       this.prisma.bridgeTransfer.findMany({
         where:   { userId },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt:'desc' },
         skip,
         take:    limit,
-        include: { validatorSignatures: { select: { validatorAddr: true, signedAt: true } } },
+        include: { validatorSignatures:{ select:{ validatorAddress:true, createdAt:true } } },
       }),
-      this.prisma.bridgeTransfer.count({ where: { userId } }),
+      this.prisma.bridgeTransfer.count({ where:{ userId } }),
     ]);
-    return { data, total, page, limit };
+    return { data, total, page, limit, totalPages: Math.ceil(total/limit) };
   }
 
-  async getTransfersByStatus(status: string, page = 1, limit = 50) {
-    const skip = (page - 1) * limit;
-    const [data, total] = await Promise.all([
-      this.prisma.bridgeTransfer.findMany({
-        where:   { status },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take:    limit,
-      }),
-      this.prisma.bridgeTransfer.count({ where: { status } }),
-    ]);
-    return { data, total, page, limit };
-  }
+  // ─── Relayer: execute mint (called by validator/relayer service) ─────────────
 
-  /** Get all supported chains and tokens */
-  getSupportedRoutes() {
-    const routes: any[] = [];
-    const chains = Object.keys(CHAIN_CONFIGS);
-    for (const src of chains) {
-      for (const dst of chains) {
-        if (src !== dst) {
-          routes.push({
-            srcChain: src,
-            dstChain: dst,
-            tokens:   ['INRX', 'EGOLD', 'ESLVR'],
-          });
-        }
-      }
+  async executeMint(transferId: string, signatures: string[]) {
+    const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
+    if (!transfer) throw new NotFoundException('Transfer not found');
+    if (transfer.status !== 'LOCKED') {
+      throw new BadRequestException(`Transfer status is ${transfer.status}, expected LOCKED`);
     }
-    return { chains, routes };
-  }
 
-  /** Check if nonce is already processed on a specific chain's bridge */
-  async isNonceProcessed(chain: string, srcChainId: number, nonce: string): Promise<boolean> {
-    const config = CHAIN_CONFIGS[chain];
-    if (!config || !config.isEvm) return false;
+    const provider    = this.getProvider(transfer.dstChain);
+    const relayer     = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY!, provider);
+    const bridgeAddr  = this.getBridgeAddress(transfer.dstChain);
+    const bridge      = new ethers.Contract(bridgeAddr, BRIDGE_V2_ABI, relayer);
 
-    const rpcUrl = process.env[config.rpcEnvKey];
-    if (!rpcUrl) return false;
-
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
-    const bridge   = new ethers.Contract(config.bridgeAddress, BRIDGE_V2_ABI, provider);
-
-    const nonceKey = ethers.keccak256(
-      ethers.AbiCoder.defaultAbiCoder().encode(['uint256', 'uint256'], [srcChainId, nonce]),
+    const tokenId  = this.tokenIds[transfer.token];
+    const srcNonce = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ['uint256','uint256'],
+        [this.chainIds[transfer.srcChain], BigInt(transfer.nonce)]
+      )
     );
 
-    return bridge.isNonceProcessed(nonceKey);
+    const tx      = await bridge.mintTokens(
+      tokenId, transfer.dstAddress,
+      ethers.parseUnits(transfer.amount, 6),
+      transfer.srcChain, srcNonce, signatures,
+    );
+    const receipt = await tx.wait();
+
+    await this.prisma.bridgeTransfer.update({
+      where: { id:transferId },
+      data:  { status:'COMPLETED', dstTxHash:receipt.hash },
+    });
+
+    this.logger.log(`Mint executed: ${receipt.hash}`);
+    return { txHash:receipt.hash, status:'COMPLETED' };
+  }
+
+  // ─── Relayer: execute unlock ──────────────────────────────────────────────
+
+  async executeUnlock(transferId: string, signatures: string[]) {
+    const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
+    if (!transfer) throw new NotFoundException('Transfer not found');
+    if (transfer.status !== 'LOCKED') {
+      throw new BadRequestException(`Transfer status is ${transfer.status}, expected LOCKED`);
+    }
+
+    const provider   = this.getProvider(transfer.srcChain);
+    const relayer    = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY!, provider);
+    const bridgeAddr = this.getBridgeAddress(transfer.srcChain);
+    const bridge     = new ethers.Contract(bridgeAddr, BRIDGE_V2_ABI, relayer);
+
+    const tokenId  = this.tokenIds[transfer.token];
+    const srcNonce = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ['uint256','uint256'],
+        [this.chainIds[transfer.dstChain], BigInt(transfer.nonce)]
+      )
+    );
+
+    const tx = await bridge.unlock(
+      tokenId, transfer.srcAddress,
+      ethers.parseUnits(transfer.amount, 6),
+      this.chainIds[transfer.dstChain],
+      srcNonce, signatures,
+    );
+    const receipt = await tx.wait();
+
+    await this.prisma.bridgeTransfer.update({
+      where: { id:transferId },
+      data:  { status:'COMPLETED', dstTxHash:receipt.hash },
+    });
+
+    return { txHash:receipt.hash, status:'COMPLETED' };
+  }
+
+  // ─── Get bridge status across chains ────────────────────────────────────────
+
+  async getBridgeStatus() {
+    const chains  = ['ethereum','polygon'];
+    const results = [];
+    for (const chain of chains) {
+      try {
+        const addr    = this.getBridgeAddress(chain);
+        const provider= this.getProvider(chain);
+        const bridge  = new ethers.Contract(addr, BRIDGE_V2_ABI, provider);
+        const paused  = await bridge.paused();
+        results.push({ chain, address:addr, paused, status: paused ? 'PAUSED':'ACTIVE' });
+      } catch {
+        results.push({ chain, status:'UNREACHABLE' });
+      }
+    }
+    return results;
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+
+  getProvider(chain: string): ethers.JsonRpcProvider {
+    const map: Record<string,string> = {
+      ethereum: process.env.ETH_RPC!,
+      bsc:      process.env.BSC_RPC!,
+      polygon:  process.env.POLYGON_RPC!,
+    };
+    if (!map[chain]) throw new BadRequestException(`Unsupported EVM chain: ${chain}`);
+    return new ethers.JsonRpcProvider(map[chain]);
+  }
+
+  getBridgeAddress(chain: string): string {
+    const map: Record<string,string> = {
+      ethereum: process.env.SEPOLIA_BRIDGE_V2_ADDRESS   || process.env.ETH_BRIDGE_V2_ADDRESS!,
+      bsc:      process.env.BSC_BRIDGE_V2_ADDRESS!,
+      polygon:  process.env.POLYGONMUMBAI_BRIDGE_V2_ADDRESS || process.env.POLYGON_BRIDGE_V2_ADDRESS!,
+    };
+    if (!map[chain]) throw new BadRequestException(`Bridge not configured for chain: ${chain}`);
+    return map[chain];
+  }
+
+  getTokenId(symbol: string): string {
+    const id = this.tokenIds[symbol];
+    if (!id) throw new BadRequestException(`Unknown token: ${symbol}`);
+    return id;
+  }
+
+  getChainId(chain: string): bigint {
+    const id = this.chainIds[chain];
+    if (!id) throw new BadRequestException(`Unknown chain: ${chain}`);
+    return id;
   }
 }

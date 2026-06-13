@@ -1,34 +1,22 @@
-import { Module } from '@nestjs/common';
+import { Module }       from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { BullModule } from '@nestjs/bull';
+import { BullModule }   from '@nestjs/bull';
 import { PrismaModule } from './prisma/prisma.module';
-import { RedisModule } from './redis/redis.module';
+import { RedisModule }  from './redis/redis.module';
 import { BridgeModule } from './bridge/bridge.module';
+
+function parseRedisUrl(url: string) {
+  const m = url.match(/redis:\/\/:(.+)@(.+):(\d+)/);
+  if (m) return { host:m[2], port:parseInt(m[3]), password:decodeURIComponent(m[1]) };
+  return { host:'127.0.0.1', port:6379 };
+}
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
-
-    // Parse REDIS_URL for Bull
+    ConfigModule.forRoot({ isGlobal:true }),
     BullModule.forRootAsync({
-      useFactory: () => {
-        const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
-        const match = url.match(/redis:\/\/:(.+)@(.+):(\d+)/);
-        if (match) {
-          return {
-            redis: {
-              host:     match[2],
-              port:     parseInt(match[3]),
-              password: decodeURIComponent(match[1]),
-            },
-          };
-        }
-        const simple = url.match(/redis:\/\/([^:]+):(\d+)/);
-        if (simple) return { redis: { host: simple[1], port: parseInt(simple[2]) } };
-        return { redis: { host: 'localhost', port: 6379 } };
-      },
+      useFactory: () => ({ redis: parseRedisUrl(process.env.REDIS_URL ?? '') }),
     }),
-
     PrismaModule,
     RedisModule,
     BridgeModule,
