@@ -7,6 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService }  from '../redis/redis.service';
 import { MintDto }       from './dto/mint.dto';
 import { BurnDto }       from './dto/burn.dto';
+import { TxType } from '@prisma/client';
 
 // Full token ABI matching our INRX/EGold/ESilver contracts
 const TOKEN_ABI = [
@@ -242,7 +243,7 @@ export class StablecoinService {
   ) {
     await Promise.all([
       this.prisma.transaction.create({
-        data: { walletId:'system', txHash, chain, type, amount, tokenSymbol:token,
+        data: { walletId:'system', txHash, chain, type: type as TxType, amount, tokenSymbol: token,
                 fromAddress:from, toAddress:to, status:'CONFIRMED', confirmedAt:new Date() },
       }),
       this.prisma.auditLog.create({

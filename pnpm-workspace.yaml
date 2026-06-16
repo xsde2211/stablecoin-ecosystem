@@ -2,7 +2,6 @@ packages:
   - "contracts/*"
   - "packages/*"
   - "services/*"
-  - "apps/*"
 
 allowBuilds:
   '@nestjs/core': true
@@ -13,6 +12,7 @@ allowBuilds:
   keccak: true
   msgpackr-extract: true
   prisma: true
+  react-native-screens: true
   secp256k1: true
   utf-8-validate: true
 

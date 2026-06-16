@@ -1,0 +1,7 @@
+import { IsString, IsNotEmpty } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
+export class SuspendUserDto {
+  @ApiProperty({ example:'Suspicious activity reported' })
+  @IsString() @IsNotEmpty()
+  reason: string;
+}

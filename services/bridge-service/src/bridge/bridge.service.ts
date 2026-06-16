@@ -177,7 +177,7 @@ export class BridgeService {
         orderBy: { createdAt:'desc' },
         skip,
         take:    limit,
-        include: { validatorSignatures:{ select:{ validatorAddress:true, createdAt:true } } },
+        include: { validatorSignatures: { select: { validatorAddr: true, signedAt: true } } },
       }),
       this.prisma.bridgeTransfer.count({ where:{ userId } }),
     ]);

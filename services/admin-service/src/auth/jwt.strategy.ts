@@ -1,0 +1,15 @@
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { PassportStrategy }                  from '@nestjs/passport';
+import { ExtractJwt, Strategy }              from 'passport-jwt';
+import { RedisService }                      from '../redis/redis.service';
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy,'jwt') {
+  constructor(private redis: RedisService) {
+    super({ jwtFromRequest:ExtractJwt.fromAuthHeaderAsBearerToken(), ignoreExpiration:false, secretOrKey:process.env.JWT_SECRET!, passReqToCallback:true });
+  }
+  async validate(req:any,payload:any) {
+    const t=ExtractJwt.fromAuthHeaderAsBearerToken()(req);
+    if(await this.redis.exists(`blacklist:${t}`)) throw new UnauthorizedException('Token revoked');
+    return { sub:payload.sub, email:payload.email, role:payload.role };
+  }
+}

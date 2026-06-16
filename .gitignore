@@ -11,8 +11,9 @@ sync-tokens.js
 build
 deployments
 
+servicesv1
+
 packages.zip
-services
 tools
 
 .vscode
@@ -25,3 +26,5 @@ contracts/solana/target
 
 /setup.sh
 /pnpm-lock.yaml
+
+mobileV1
