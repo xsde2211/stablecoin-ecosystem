@@ -1,57 +1,42 @@
 import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, Alert, KeyboardAvoidingView, Platform,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  SafeAreaView, Alert,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import * as Haptics from 'expo-haptics';
-import { api } from '../../services/api';
-import { Button }    from '../../components/ui/Button';
-import { Input }     from '../../components/ui/Input';
+import { useNavigation, useRoute } from '@react-navigation/native';
+import { useSelector } from 'react-redux';
+import { Ionicons } from '@expo/vector-icons';
+import { Header } from '../../components/ui/Header';
+import { Input }  from '../../components/ui/Input';
+import { Button } from '../../components/ui/Button';
+import { Card }   from '../../components/ui/Card';
 import { TokenIcon } from '../../components/ui/TokenIcon';
-import { colors, spacing, typography, radius } from '../../theme';
+import { ChainBadge } from '../../components/ui/ChainBadge';
+import { colors, typography, spacing, radius } from '../../theme';
+import { api } from '../../services/api';
+import type { RootState } from '../../store';
 
-const CHAINS  = ['tron','ethereum','bsc','polygon'];
-const TOKENS  = ['INRX','EGOLD','ESLVR'];
+const TOKENS = ['INRX','EGOLD','ESLVR'];
+const CHAINS = ['tron','ethereum','bsc','polygon'];
 
-const CHAIN_LABELS: Record<string,string> = {
-  tron:'TRON', ethereum:'Ethereum', bsc:'BSC', polygon:'Polygon',
-};
+type Mode = 'lock'|'burn';
 
-function ChainSelector({
-  label, value, onChange, exclude,
-}: { label:string; value:string; onChange:(v:string)=>void; exclude:string }) {
-  return (
-    <View style={{ flex:1 }}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-      {CHAINS.filter(c => c !== exclude).map(c => (
-        <TouchableOpacity
-          key={c}
-          style={[styles.chainOption, value===c && styles.chainOptionActive]}
-          onPress={() => onChange(c)}
-        >
-          <View style={[styles.chainDot, { backgroundColor: {
-            tron:'#EF0027', ethereum:'#627EEA', bsc:'#F0B90B', polygon:'#8247E5',
-          }[c] }]} />
-          <Text style={[styles.chainOptionText, value===c && { color:colors.teal }]}>
-            {CHAIN_LABELS[c]}
-          </Text>
-          {value===c && <Text style={{ color:colors.teal, marginLeft:'auto' }}>✓</Text>}
-        </TouchableOpacity>
-      ))}
-    </View>
-  );
-}
+export default function BridgeScreen() {
+  const navigation = useNavigation<any>();
+  const route = useRoute<any>();
+  const { balances } = useSelector((s: RootState) => s.wallet);
 
-export function BridgeScreen({ navigation }: any) {
-  const [srcChain,    setSrcChain]    = useState('tron');
-  const [dstChain,    setDstChain]    = useState('ethereum');
-  const [token,       setToken]       = useState('INRX');
-  const [amount,      setAmount]      = useState('');
-  const [dstAddress,  setDstAddress]  = useState('');
-  const [loading,     setLoading]     = useState(false);
-  const [step,        setStep]        = useState<'form'|'confirm'|'pending'>('form');
-  const [txResult,    setTxResult]    = useState<any>(null);
+  const [mode, setMode]   = useState<Mode>('lock');
+  const [token, setToken] = useState(route.params?.token ?? 'INRX');
+  const [srcChain, setSrcChain] = useState('tron');
+  const [dstChain, setDstChain] = useState('ethereum');
+  const [amount, setAmount]     = useState('');
+  const [dstAddress, setDstAddress] = useState('');
+  const [loading, setLoading]   = useState(false);
+  const [step, setStep]         = useState<'form'|'success'>('form');
+
+  const balance = (balances ?? []).find((b:any) => b.symbol === token && b.chain === srcChain);
+  const availableBalance = parseFloat(balance?.balance ?? '0');
 
   const swapChains = () => {
     const tmp = srcChain;
@@ -60,230 +45,181 @@ export function BridgeScreen({ navigation }: any) {
   };
 
   const handleBridge = async () => {
-    if (!amount || !dstAddress) { Alert.alert('Error','Fill all fields'); return; }
-    if (srcChain === dstChain)  { Alert.alert('Error','Source and destination must differ'); return; }
     setLoading(true);
     try {
-      const result = await api.initiateBridge({ srcChain, dstChain, token, amount, dstAddress });
-      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setTxResult(result);
-      setStep('pending');
-    } catch (e: any) {
-      Alert.alert('Bridge Error', e?.response?.data?.message ?? 'Failed to initiate bridge');
+      if (mode === 'lock') {
+        await api.initiateBridge({ srcChain, dstChain, token, amount, dstAddress });
+      } else {
+        await api.burnBridge({ chain: srcChain, token, amount, srcChain: dstChain, srcRecipient: dstAddress });
+      }
+      setStep('success');
+    } catch (err: any) {
+      Alert.alert('Bridge failed', err?.response?.data?.message || 'Please try again');
     } finally {
       setLoading(false);
     }
   };
 
-  if (step === 'pending' && txResult) {
+  if (step === 'success') {
     return (
-      <View style={styles.container}>
-        <LinearGradient colors={[colors.bgSecondary, colors.bg]} style={StyleSheet.absoluteFill} />
+      <SafeAreaView style={styles.container}>
         <View style={styles.successContainer}>
-          <LinearGradient colors={[colors.tealBg, 'transparent']} style={styles.successGlow} />
           <View style={styles.successIcon}>
-            <Text style={{ fontSize:40 }}>⇄</Text>
+            <Ionicons name="swap-horizontal" size={36} color={colors.teal} />
           </View>
-          <Text style={styles.successTitle}>Bridge Initiated</Text>
-          <Text style={styles.successSubtitle}>
-            {amount} {token} · {CHAIN_LABELS[srcChain]} → {CHAIN_LABELS[dstChain]}
+          <Text style={typography.h2}>Bridge Initiated</Text>
+          <Text style={[typography.body, { color:colors.textSecondary, marginTop:8, textAlign:'center' }]}>
+            {amount} {token} is being transferred from {srcChain.toUpperCase()} to {dstChain.toUpperCase()}.{'\n\n'}
+            This typically takes a few minutes while validators confirm the transfer.
           </Text>
-          <View style={styles.successCard}>
-            <View style={styles.successRow}>
-              <Text style={styles.successLabel}>Transfer ID</Text>
-              <Text style={styles.successValue} numberOfLines={1}>
-                {txResult.id?.slice(0,16)}...
-              </Text>
-            </View>
-            <View style={styles.successRow}>
-              <Text style={styles.successLabel}>Status</Text>
-              <Text style={[styles.successValue, { color:colors.warning }]}>
-                Collecting signatures
-              </Text>
-            </View>
-            <View style={styles.successRow}>
-              <Text style={styles.successLabel}>Est. time</Text>
-              <Text style={styles.successValue}>5–15 minutes</Text>
-            </View>
-          </View>
-          <View style={styles.stepsCard}>
-            {['Lock on source chain','Validator signatures','Mint on destination'].map((s,i) => (
-              <View key={i} style={styles.stepRow}>
-                <View style={[styles.stepNum, i===0 && styles.stepActive]}>
-                  <Text style={styles.stepNumText}>{i+1}</Text>
-                </View>
-                <Text style={[styles.stepText, i===0 && { color:colors.teal }]}>{s}</Text>
-              </View>
-            ))}
-          </View>
-          <TouchableOpacity style={styles.doneBtn} onPress={() => { setStep('form'); navigation.goBack(); }}>
-            <Text style={styles.doneBtnText}>Back to Dashboard</Text>
-          </TouchableOpacity>
+          <View style={{ flex:1 }} />
+          <Button label="View Bridge History" variant="secondary" onPress={() => navigation.navigate('BridgeHistory')} />
+          <View style={{ height:spacing.md }} />
+          <Button label="Done" onPress={() => navigation.navigate('Dashboard')} />
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS==='ios'?'padding':'height'}>
-      <LinearGradient colors={[colors.bgSecondary, colors.bg]} style={StyleSheet.absoluteFill} />
+    <SafeAreaView style={styles.container}>
+      <Header title="Bridge" subtitle="Move assets across chains" rightIcon="time-outline" onRightPress={() => navigation.navigate('BridgeHistory')} />
+      <ScrollView contentContainerStyle={styles.content}>
 
-      <View style={styles.topBar}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.back}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>Cross-Chain Bridge</Text>
-        <View style={{ width:32 }} />
-      </View>
+        {/* Mode tabs */}
+        <View style={styles.modeTabs}>
+          <TouchableOpacity style={[styles.modeTab, mode==='lock' && styles.modeTabActive]} onPress={() => setMode('lock')}>
+            <Text style={[styles.modeTabText, mode==='lock' && styles.modeTabTextActive]}>Bridge Out</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.modeTab, mode==='burn' && styles.modeTabActive]} onPress={() => setMode('burn')}>
+            <Text style={[styles.modeTabText, mode==='burn' && styles.modeTabTextActive]}>Bridge Back</Text>
+          </TouchableOpacity>
+        </View>
 
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-
-        {/* Token selector */}
-        <Text style={styles.fieldLabel}>Token</Text>
-        <View style={styles.tokenRow}>
+        {/* Token */}
+        <Text style={styles.label}>Asset</Text>
+        <View style={styles.tokenSelector}>
           {TOKENS.map(t => (
-            <TouchableOpacity
-              key={t}
-              style={[styles.tokenOption, token===t && styles.tokenOptionActive]}
-              onPress={() => setToken(t)}
-            >
+            <TouchableOpacity key={t} style={[styles.tokenChip, token===t && styles.tokenChipActive]} onPress={() => setToken(t)}>
               <TokenIcon token={t} size={28} />
-              <Text style={[styles.tokenOptionText, token===t && { color:colors.teal }]}>{t}</Text>
+              <Text style={[styles.tokenChipText, token===t && { color:colors.text }]}>{t}</Text>
             </TouchableOpacity>
           ))}
         </View>
 
-        {/* Chain selectors */}
-        <View style={styles.chainSelectContainer}>
-          <View style={{ flex:1 }}>
-            <Text style={styles.fieldLabel}>From</Text>
-            {CHAINS.map(c => (
-              <TouchableOpacity
-                key={c}
-                style={[styles.chainOption, srcChain===c && styles.chainOptionActive]}
-                onPress={() => { setSrcChain(c); if(c===dstChain) setDstChain(CHAINS.find(x=>x!==c)!); }}
-              >
-                <View style={[styles.chainDot, { backgroundColor:{tron:'#EF0027',ethereum:'#627EEA',bsc:'#F0B90B',polygon:'#8247E5'}[c] }]} />
-                <Text style={[styles.chainOptionText, srcChain===c && { color:colors.teal }]}>{CHAIN_LABELS[c]}</Text>
-                {srcChain===c && <Text style={{ color:colors.teal, marginLeft:'auto' }}>✓</Text>}
-              </TouchableOpacity>
-            ))}
+        {/* Chain flow */}
+        <View style={styles.chainFlow}>
+          <View style={styles.chainBox}>
+            <Text style={styles.chainLabel}>From</Text>
+            <View style={styles.chainPicker}>
+              {CHAINS.map(c => (
+                <TouchableOpacity key={c} onPress={() => setSrcChain(c)} style={[styles.chainOption, srcChain===c && styles.chainOptionActive]}>
+                  <ChainBadge chain={c} size="xs" />
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
 
-          {/* Swap button */}
           <TouchableOpacity style={styles.swapBtn} onPress={swapChains}>
-            <LinearGradient colors={[colors.teal, colors.tealDim]} style={styles.swapGradient}>
-              <Text style={styles.swapIcon}>⇄</Text>
-            </LinearGradient>
+            <Ionicons name="swap-horizontal" size={18} color={colors.teal} />
           </TouchableOpacity>
 
-          <View style={{ flex:1 }}>
-            <Text style={styles.fieldLabel}>To</Text>
-            {CHAINS.map(c => (
-              <TouchableOpacity
-                key={c}
-                style={[styles.chainOption, dstChain===c && styles.chainOptionActive,
-                        c===srcChain && styles.chainOptionDisabled]}
-                onPress={() => { if(c!==srcChain) setDstChain(c); }}
-                disabled={c===srcChain}
-              >
-                <View style={[styles.chainDot, { backgroundColor:{tron:'#EF0027',ethereum:'#627EEA',bsc:'#F0B90B',polygon:'#8247E5'}[c] }]} />
-                <Text style={[styles.chainOptionText, dstChain===c && { color:colors.teal },
-                              c===srcChain && { color:colors.textTertiary }]}>{CHAIN_LABELS[c]}</Text>
-                {dstChain===c && <Text style={{ color:colors.teal, marginLeft:'auto' }}>✓</Text>}
-              </TouchableOpacity>
-            ))}
+          <View style={styles.chainBox}>
+            <Text style={styles.chainLabel}>To</Text>
+            <View style={styles.chainPicker}>
+              {CHAINS.filter(c=>c!==srcChain).map(c => (
+                <TouchableOpacity key={c} onPress={() => setDstChain(c)} style={[styles.chainOption, dstChain===c && styles.chainOptionActive]}>
+                  <ChainBadge chain={c} size="xs" />
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
         </View>
 
-        <Input label="Amount" value={amount} onChangeText={setAmount}
-               keyboardType="decimal-pad" placeholder="0.00"
-               hint={`Bridging ${token} from ${CHAIN_LABELS[srcChain]} to ${CHAIN_LABELS[dstChain]}`} />
-
-        <Input label="Destination Address" value={dstAddress} onChangeText={setDstAddress}
-               placeholder="Recipient address on destination chain" autoCapitalize="none" />
-
-        {/* Info card */}
-        <View style={styles.infoCard}>
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>Bridge fee</Text>
-            <Text style={styles.infoValue}>0.1%</Text>
+        {/* Amount */}
+        <View style={styles.amountSection}>
+          <View style={styles.amountHeader}>
+            <Text style={styles.label}>Amount</Text>
+            <Text style={styles.balanceText}>Balance: {availableBalance.toFixed(4)} {token}</Text>
           </View>
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>Est. time</Text>
-            <Text style={styles.infoValue}>5–15 min</Text>
-          </View>
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>Validators required</Text>
-            <Text style={styles.infoValue}>2 of 3</Text>
-          </View>
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>You receive</Text>
-            <Text style={[styles.infoValue, { color:colors.teal }]}>
-              {amount ? (parseFloat(amount)*0.999).toFixed(6) : '0'} {token}
-            </Text>
+          <View style={styles.amountInputWrap}>
+            <Input placeholder="0.00" value={amount} onChangeText={setAmount} keyboardType="decimal-pad" style={styles.amountInput} />
+            <TouchableOpacity style={styles.maxBtn} onPress={() => setAmount(availableBalance.toString())}>
+              <Text style={styles.maxBtnText}>MAX</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
-        <Button label="Initiate Bridge Transfer" onPress={handleBridge} loading={loading} />
+        {/* Destination address */}
+        <Input
+          label={`Recipient address on ${dstChain.toUpperCase()}`}
+          placeholder={`Your ${dstChain} wallet address`}
+          value={dstAddress}
+          onChangeText={setDstAddress}
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+
+        {/* Info */}
+        <View style={styles.infoBox}>
+          <Ionicons name="time-outline" size={16} color={colors.info} />
+          <Text style={styles.infoText}>
+            Bridge transfers require validator confirmation and typically complete within 5-15 minutes.
+          </Text>
+        </View>
+
+        <View style={{ flex:1 }} />
+        <Button
+          label={mode==='lock' ? 'Bridge Out' : 'Bridge Back'}
+          onPress={handleBridge}
+          loading={loading}
+          disabled={!amount || !dstAddress || parseFloat(amount) <= 0 || parseFloat(amount) > availableBalance}
+        />
       </ScrollView>
-    </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container:          { flex:1, backgroundColor:colors.bg },
-  topBar:             { flexDirection:'row', alignItems:'center', justifyContent:'space-between',
-                        paddingHorizontal:spacing.lg, paddingTop:60, paddingBottom:spacing.md },
-  back:               { fontSize:26, color:colors.text, fontWeight:'300' },
-  title:              { ...typography.h4, color:colors.text },
-  body:               { padding:spacing.lg },
-  fieldLabel:         { ...typography.sm, color:colors.textSecondary, fontWeight:'600',
-                        marginBottom:spacing.sm, marginTop:spacing.md },
-  tokenRow:           { flexDirection:'row', gap:spacing.sm, marginBottom:spacing.sm },
-  tokenOption:        { flex:1, flexDirection:'row', alignItems:'center', gap:8, padding:spacing.md,
-                        backgroundColor:colors.surface, borderRadius:radius.lg,
-                        borderWidth:1, borderColor:colors.border },
-  tokenOptionActive:  { borderColor:colors.teal, backgroundColor:colors.tealBg },
-  tokenOptionText:    { ...typography.sm, color:colors.textSecondary, fontWeight:'700' },
-  chainSelectContainer:{ flexDirection:'row', gap:spacing.sm, alignItems:'flex-start', marginBottom:spacing.md },
-  chainOption:        { flexDirection:'row', alignItems:'center', gap:8, padding:spacing.md,
-                        backgroundColor:colors.surface, borderRadius:radius.lg,
-                        borderWidth:1, borderColor:colors.border, marginBottom:spacing.xs },
-  chainOptionActive:  { borderColor:colors.teal, backgroundColor:colors.tealBg },
-  chainOptionDisabled:{ opacity:0.35 },
-  chainOptionText:    { ...typography.sm, color:colors.textSecondary, fontWeight:'600', flex:1 },
-  chainDot:           { width:8, height:8, borderRadius:4 },
-  swapBtn:            { alignSelf:'center', marginTop:spacing.xl },
-  swapGradient:       { width:40, height:40, borderRadius:20, alignItems:'center', justifyContent:'center' },
-  swapIcon:           { fontSize:18, color:'#000', fontWeight:'800' },
-  infoCard:           { backgroundColor:colors.surface, borderRadius:radius.lg, borderWidth:1,
-                        borderColor:colors.border, padding:spacing.lg, gap:10, marginBottom:spacing.lg },
-  infoRow:            { flexDirection:'row', justifyContent:'space-between' },
-  infoLabel:          { ...typography.sm, color:colors.textSecondary },
-  infoValue:          { ...typography.sm, color:colors.text, fontWeight:'600' },
-  // Success state
-  successContainer:   { flex:1, padding:spacing.lg, paddingTop:100, alignItems:'center' },
-  successGlow:        { ...StyleSheet.absoluteFillObject, borderRadius:999 },
-  successIcon:        { width:80, height:80, borderRadius:40, backgroundColor:colors.tealBg,
-                        alignItems:'center', justifyContent:'center', marginBottom:spacing.lg,
-                        borderWidth:1, borderColor:colors.teal },
-  successTitle:       { ...typography.h2, color:colors.text, marginBottom:8 },
-  successSubtitle:    { ...typography.body, color:colors.textSecondary, marginBottom:spacing.xl, textAlign:'center' },
-  successCard:        { backgroundColor:colors.surface, borderRadius:radius.xl, borderWidth:1,
-                        borderColor:colors.border, padding:spacing.lg, width:'100%', marginBottom:spacing.lg },
-  successRow:         { flexDirection:'row', justifyContent:'space-between', marginBottom:spacing.sm },
-  successLabel:       { ...typography.sm, color:colors.textSecondary },
-  successValue:       { ...typography.sm, color:colors.text, fontWeight:'600', fontFamily:'monospace' },
-  stepsCard:          { backgroundColor:colors.surface, borderRadius:radius.xl, borderWidth:1,
-                        borderColor:colors.border, padding:spacing.lg, width:'100%', marginBottom:spacing.xl, gap:spacing.md },
-  stepRow:            { flexDirection:'row', alignItems:'center', gap:12 },
-  stepNum:            { width:28, height:28, borderRadius:14, backgroundColor:colors.bgTertiary,
-                        borderWidth:1, borderColor:colors.border, alignItems:'center', justifyContent:'center' },
-  stepActive:         { backgroundColor:colors.tealBg, borderColor:colors.teal },
-  stepNumText:        { ...typography.xs, color:colors.textSecondary, fontWeight:'700' },
-  stepText:           { ...typography.sm, color:colors.textSecondary },
-  doneBtn:            { backgroundColor:colors.tealBg, borderRadius:radius.lg, paddingVertical:16,
-                        paddingHorizontal:40, borderWidth:1, borderColor:colors.teal },
-  doneBtnText:        { ...typography.body, color:colors.teal, fontWeight:'700' },
+  container: { flex:1, backgroundColor: colors.bg },
+  content:   { paddingHorizontal: spacing.xl, paddingBottom: spacing.xxxl, flexGrow:1 },
+  label:     { ...typography.sm, color:colors.textSecondary, fontWeight:'600', marginBottom:10, marginTop: spacing.lg },
+
+  modeTabs:  { flexDirection:'row', backgroundColor:colors.surface, borderRadius:radius.lg, padding:4, borderWidth:1, borderColor:colors.border },
+  modeTab:   { flex:1, paddingVertical:10, alignItems:'center', borderRadius:radius.md },
+  modeTabActive: { backgroundColor:colors.tealBg2 },
+  modeTabText: { ...typography.sm, color:colors.textSecondary, fontWeight:'700' },
+  modeTabTextActive: { color:colors.teal },
+
+  tokenSelector: { flexDirection:'row', gap:spacing.sm },
+  tokenChip:  { flex:1, alignItems:'center', gap:6, padding:spacing.md, borderRadius:radius.lg,
+                backgroundColor:colors.surface, borderWidth:1, borderColor:colors.border },
+  tokenChipActive: { borderColor: colors.tealBorder, backgroundColor: colors.tealBg },
+  tokenChipText: { ...typography.sm, color:colors.textSecondary, fontWeight:'700' },
+
+  chainFlow: { flexDirection:'row', alignItems:'flex-end', gap:spacing.sm, marginTop:spacing.lg },
+  chainBox:  { flex:1 },
+  chainLabel:{ ...typography.xs, color:colors.textTertiary, marginBottom:8 },
+  chainPicker: { flexDirection:'row', flexWrap:'wrap', gap:6, backgroundColor:colors.surface, padding:8, borderRadius:radius.md, borderWidth:1, borderColor:colors.border, minHeight:46 },
+  chainOption: { padding:2, borderRadius:radius.sm },
+  chainOptionActive: { backgroundColor:colors.tealBg },
+  swapBtn:   { width:36, height:36, borderRadius:18, backgroundColor:colors.tealBg2, borderWidth:1, borderColor:colors.tealBorder,
+               alignItems:'center', justifyContent:'center', marginBottom:30 },
+
+  amountSection: { marginTop: spacing.lg },
+  amountHeader:  { flexDirection:'row', justifyContent:'space-between', alignItems:'center' },
+  balanceText:   { ...typography.xs, color:colors.textTertiary },
+  amountInputWrap: { flexDirection:'row', alignItems:'center', gap:spacing.sm },
+  amountInput:   { ...typography.h2, fontWeight:'700' },
+  maxBtn:     { backgroundColor:colors.tealBg2, paddingHorizontal:14, paddingVertical:10, borderRadius:radius.md, marginBottom:spacing.md },
+  maxBtnText: { ...typography.xs, color:colors.teal, fontWeight:'700' },
+
+  infoBox: { flexDirection:'row', gap:spacing.sm, backgroundColor:colors.infoBg, padding:spacing.md,
+             borderRadius:radius.lg, marginTop:spacing.md, alignItems:'flex-start' },
+  infoText: { ...typography.xs, color:colors.info, flex:1, lineHeight:18 },
+
+  successContainer: { flex:1, alignItems:'center', padding:spacing.xl, paddingTop:spacing.xxxxl },
+  successIcon: { width:80, height:80, borderRadius:40, backgroundColor:colors.tealBg2,
+                 alignItems:'center', justifyContent:'center', marginBottom:spacing.xl,
+                 borderWidth:1, borderColor:colors.tealBorder },
 });

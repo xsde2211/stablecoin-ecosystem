@@ -1,152 +1,139 @@
 import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView,
-  TouchableOpacity, KeyboardAvoidingView, Platform, Alert,
+  View, Text, StyleSheet, KeyboardAvoidingView, Platform,
+  ScrollView, TouchableOpacity, SafeAreaView,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import { useDispatch, useSelector } from 'react-redux';
-import { loginUser, clearError } from '../../store/slices/authSlice';
-import { AppDispatch, RootState } from '../../store';
-import { Button } from '../../components/ui/Button';
+import { useNavigation } from '@react-navigation/native';
+import { useDispatch } from 'react-redux';
+import { Ionicons } from '@expo/vector-icons';
 import { Input }  from '../../components/ui/Input';
-import { colors, spacing, typography, radius } from '../../theme';
+import { Button } from '../../components/ui/Button';
+import { colors, typography, spacing } from '../../theme';
+import { loginUser } from '../../store/slices/authSlice';
+import type { AppDispatch } from '../../store';
 
-export function LoginScreen({ navigation }: any) {
-  const dispatch = useDispatch<AppDispatch>();
-  const { loading, error } = useSelector((s: RootState) => s.auth);
-  const [email,    setEmail]    = useState('');
+export default function LoginScreen() {
+  const navigation = useNavigation<any>();
+  const dispatch   = useDispatch<AppDispatch>();
+
+  const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
-  const [showPass, setShowPass] = useState(false);
+  const [totpCode, setTotpCode] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [needs2FA, setNeeds2FA] = useState(false);
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState('');
 
   const handleLogin = async () => {
-    if (!email || !password) { Alert.alert('Error', 'Please fill all fields'); return; }
-    const result = await dispatch(loginUser({ email: email.trim(), password }));
-    if (loginUser.rejected.match(result)) {
-      Alert.alert('Login Failed', result.error.message ?? 'Invalid credentials');
+    setError('');
+    if (!email || !password) { setError('Please fill in all fields'); return; }
+
+    setLoading(true);
+    try {
+      const result = await dispatch(loginUser({ email, password, totpCode: totpCode || undefined })).unwrap();
+      // success — navigation handled by RootNavigator listening to auth state
+    } catch (err: any) {
+      const msg = err?.message || 'Login failed';
+      if (msg.toLowerCase().includes('2fa')) {
+        setNeeds2FA(true);
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS==='ios'?'padding':'height'}>
-      <LinearGradient colors={['#0A0A0F','#111118','#0A0A0F']} style={StyleSheet.absoluteFill} />
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS==='ios'?'padding':undefined}>
+      <SafeAreaView style={{ flex:1 }}>
+        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
+            <Ionicons name="chevron-back" size={24} color={colors.text} />
+          </TouchableOpacity>
 
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-
-        {/* Logo */}
-        <View style={styles.logoArea}>
-          <View style={styles.logoRing}>
-            <Text style={styles.logoText}>e₹</Text>
+          <View style={styles.header}>
+            <Text style={typography.h1}>Welcome back</Text>
+            <Text style={[typography.body, { color: colors.textSecondary, marginTop:8 }]}>
+              Sign in to access your wallet
+            </Text>
           </View>
-          <Text style={styles.appName}>Stablecoin</Text>
-          <Text style={styles.tagline}>Your cross-chain financial layer</Text>
-        </View>
 
-        {/* Form Card */}
-        <View style={styles.card}>
-          <Text style={styles.title}>Welcome back</Text>
-          <Text style={styles.subtitle}>Sign in to your account</Text>
-
-          <View style={{ marginTop: spacing.xl }}>
+          <View style={styles.form}>
             <Input
-              label="Email address"
+              label="Email"
+              placeholder="you@example.com"
               value={email}
               onChangeText={setEmail}
               keyboardType="email-address"
               autoCapitalize="none"
               autoComplete="email"
-              placeholder="you@example.com"
             />
             <Input
               label="Password"
+              placeholder="••••••••"
               value={password}
               onChangeText={setPassword}
-              secureTextEntry={!showPass}
-              placeholder="Your password"
+              secureTextEntry={!showPassword}
               rightIcon={
-                <TouchableOpacity onPress={() => setShowPass(!showPass)}>
-                  <Text style={styles.showHide}>{showPass ? 'Hide' : 'Show'}</Text>
+                <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
+                  <Ionicons name={showPassword ? 'eye-off-outline' : 'eye-outline'} size={20} color={colors.textTertiary} />
                 </TouchableOpacity>
               }
             />
+
+            {needs2FA && (
+              <Input
+                label="2FA Code"
+                placeholder="6-digit code from your authenticator"
+                value={totpCode}
+                onChangeText={setTotpCode}
+                keyboardType="number-pad"
+                maxLength={6}
+              />
+            )}
+
+            {!!error && (
+              <View style={styles.errorBox}>
+                <Ionicons name="alert-circle" size={16} color={colors.error} />
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
+            )}
+
+            <View style={{ height: spacing.sm }} />
+            <Button label="Sign In" onPress={handleLogin} loading={loading} />
+
+            <TouchableOpacity style={styles.forgotBtn}>
+              <Text style={styles.forgotText}>Forgot password?</Text>
+            </TouchableOpacity>
           </View>
 
-          // In LoginScreen.tsx, replace the forgotRow TouchableOpacity:
-<TouchableOpacity
-  style={styles.forgotRow}
-  onPress={() => Alert.alert(
-    'Reset Password',
-    'Enter your email address and we will send you a reset link.',
-    [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Send Reset Link',
-        onPress: async () => {
-          if (!email) {
-            Alert.alert('Error', 'Enter your email address first');
-            return;
-          }
-          try {
-            // For now show success — backend endpoint to be added
-            Alert.alert('Email Sent', `Password reset instructions sent to ${email}`);
-          } catch {
-            Alert.alert('Error', 'Could not send reset email');
-          }
-        }
-      }
-    ]
-  )}
->
-  <Text style={styles.forgotText}>Forgot password?</Text>
-</TouchableOpacity>
-
-          <Button label="Sign In" onPress={handleLogin} loading={loading} />
-
-          <View style={styles.divider}>
-            <View style={styles.divLine} />
-            <Text style={styles.divText}>or</Text>
-            <View style={styles.divLine} />
+          <View style={styles.footer}>
+            <Text style={styles.footerText}>Don't have an account? </Text>
+            <TouchableOpacity onPress={() => navigation.navigate('Register')}>
+              <Text style={styles.footerLink}>Sign up</Text>
+            </TouchableOpacity>
           </View>
-
-          <TouchableOpacity style={styles.registerBtn} onPress={() => navigation.navigate('Register')}>
-            <Text style={styles.registerText}>
-              Don't have an account?{' '}
-              <Text style={{ color: colors.teal, fontWeight:'600' }}>Create one</Text>
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Security note */}
-        <View style={styles.securityNote}>
-          <Text style={styles.securityText}>🔒 256-bit encrypted · Self-custody wallet</Text>
-        </View>
-
-      </ScrollView>
+        </ScrollView>
+      </SafeAreaView>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container:    { flex:1, backgroundColor:colors.bg },
-  scroll:       { flexGrow:1, paddingHorizontal:spacing.lg, paddingTop:80, paddingBottom:40 },
-  logoArea:     { alignItems:'center', marginBottom:spacing.xxxl },
-  logoRing:     { width:72, height:72, borderRadius:36, borderWidth:2, borderColor:colors.teal,
-                  alignItems:'center', justifyContent:'center', marginBottom:12,
-                  backgroundColor:colors.tealBg },
-  logoText:     { fontSize:26, fontWeight:'800', color:colors.teal },
-  appName:      { ...typography.h2, color:colors.text, marginBottom:4 },
-  tagline:      { ...typography.sm, color:colors.textSecondary },
-  card:         { backgroundColor:colors.surface, borderRadius:radius.xxl,
-                  borderWidth:1, borderColor:colors.border, padding:spacing.xl },
-  title:        { ...typography.h3, color:colors.text, marginBottom:4 },
-  subtitle:     { ...typography.body, color:colors.textSecondary },
-  showHide:     { ...typography.sm, color:colors.teal, fontWeight:'600' },
-  forgotRow:    { alignItems:'flex-end', marginBottom:spacing.lg, marginTop:-4 },
-  forgotText:   { ...typography.sm, color:colors.teal },
-  divider:      { flexDirection:'row', alignItems:'center', marginVertical:spacing.lg },
-  divLine:      { flex:1, height:1, backgroundColor:colors.border },
-  divText:      { ...typography.sm, color:colors.textTertiary, marginHorizontal:spacing.md },
-  registerBtn:  { alignItems:'center', paddingVertical:4 },
-  registerText: { ...typography.body, color:colors.textSecondary },
-  securityNote: { alignItems:'center', marginTop:spacing.xl },
-  securityText: { ...typography.xs, color:colors.textTertiary },
+  container:  { flex:1, backgroundColor: colors.bg },
+  scroll:     { flexGrow:1, paddingHorizontal: spacing.xl, paddingBottom: spacing.xxxl },
+  backBtn:    { width:40, height:40, alignItems:'center', justifyContent:'center',
+                backgroundColor:colors.surface, borderRadius:20, borderWidth:1, borderColor:colors.border,
+                marginTop: spacing.md, marginBottom: spacing.xl },
+  header:     { marginBottom: spacing.xxl },
+  form:       { gap: 0 },
+  errorBox:   { flexDirection:'row', alignItems:'center', gap:8, backgroundColor:colors.errorBg,
+                padding:spacing.md, borderRadius:12, marginBottom:spacing.md },
+  errorText:  { ...typography.sm, color:colors.error, flex:1 },
+  forgotBtn:  { alignItems:'center', marginTop: spacing.lg },
+  forgotText: { ...typography.sm, color: colors.teal, fontWeight:'600' },
+  footer:     { flexDirection:'row', justifyContent:'center', marginTop: spacing.xxxl, alignItems:'center' },
+  footerText: { ...typography.sm, color: colors.textSecondary },
+  footerLink: { ...typography.sm, color: colors.teal, fontWeight:'700' },
 });

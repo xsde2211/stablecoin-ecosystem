@@ -2,27 +2,30 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { colors, radius, typography } from '../../theme';
 
-type Variant = 'success'|'warning'|'error'|'info'|'teal'|'neutral';
+type Variant = 'teal'|'success'|'warning'|'error'|'info'|'default';
 
-const config: Record<Variant,{bg:string;text:string}> = {
-  success: { bg:colors.successBg, text:colors.success },
-  warning: { bg:colors.warningBg, text:colors.warning },
-  error:   { bg:colors.errorBg,   text:colors.error   },
-  info:    { bg:colors.infoBg,    text:colors.info     },
-  teal:    { bg:colors.tealBg,    text:colors.teal     },
-  neutral: { bg:colors.surface,   text:colors.textSecondary },
+const VARIANT_STYLES: Record<Variant, { bg:string; color:string }> = {
+  teal:    { bg:colors.tealBg2,    color:colors.teal    },
+  success: { bg:colors.successBg,  color:colors.success  },
+  warning: { bg:colors.warningBg,  color:colors.warning  },
+  error:   { bg:colors.errorBg,    color:colors.error    },
+  info:    { bg:colors.infoBg,     color:colors.info     },
+  default: { bg:colors.surface,    color:colors.textSecondary },
 };
 
-export function Badge({ label, variant='neutral' }: { label:string; variant?:Variant }) {
-  const c = config[variant];
+export function Badge({ label, variant='default', dot=false }: { label:string; variant?:Variant; dot?:boolean }) {
+  const s = VARIANT_STYLES[variant];
   return (
-    <View style={[styles.base, { backgroundColor:c.bg }]}>
-      <Text style={[styles.text, { color:c.text }]}>{label}</Text>
+    <View style={[styles.badge, { backgroundColor:s.bg }]}>
+      {dot && <View style={[styles.dot, { backgroundColor:s.color }]} />}
+      <Text style={[styles.text, { color:s.color }]}>{label}</Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  base: { paddingHorizontal:10, paddingVertical:3, borderRadius:radius.full, alignSelf:'flex-start' },
-  text: { ...typography.xs, fontWeight:'600', letterSpacing:0.2 },
+  badge: { flexDirection:'row', alignItems:'center', gap:4,
+           paddingHorizontal:8, paddingVertical:3, borderRadius:radius.full },
+  dot:   { width:5, height:5, borderRadius:3 },
+  text:  { ...typography.xs, fontWeight:'600' },
 });

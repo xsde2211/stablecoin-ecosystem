@@ -1,50 +1,35 @@
 {
   "expo": {
-    "name": "Stablecoin Wallet",
+    "name": "e-Rupee Ecosystem",
     "slug": "stablecoin-wallet",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#0A0A0F",
+    "backgroundColor": "#09090F",
     "splash": {
-      "backgroundColor": "#0A0A0F",
-      "resizeMode": "contain"
-    },
-    "ios": {
-      "supportsTablet": false,
-      "bundleIdentifier": "com.stablecoin.wallet",
-      "infoPlist": {
-        "NSCameraUsageDescription": "Used to scan QR codes for payments",
-        "NSFaceIDUsageDescription": "Used for biometric authentication"
-      }
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#09090F"
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#0A0A0F"
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#09090F"
       },
       "package": "com.stablecoin.wallet",
-      "permissions": [
-        "CAMERA",
-        "USE_BIOMETRIC",
-        "USE_FINGERPRINT"
-      ]
+      "usesCleartextTraffic": true
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.stablecoin.wallet"
     },
     "plugins": [
-      "expo-camera",
-      "expo-local-authentication",
       "expo-secure-store",
-      [
-        "expo-barcode-scanner",
-        {
-          "cameraPermission": "Allow $(APPNAME) to access camera for QR scanning."
-        }
-      ]
+      ["expo-camera", { "cameraPermission": "Allow e-Rupee to scan QR codes for payments" }]
     ],
     "extra": {
-      "eas": {
-        "projectId": "your-eas-project-id"
-      }
+      "eas": { "projectId": "your-eas-project-id" }
     }
   }
 }

@@ -1,6 +1,10 @@
 import {
-  Injectable, UnauthorizedException, ConflictException,
-  BadRequestException, NotFoundException, Logger,
+  Injectable,
+  UnauthorizedException,
+  ConflictException,
+  BadRequestException,
+  NotFoundException,
+  Logger,
 } from '@nestjs/common';
 import { JwtService }    from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
@@ -16,53 +20,62 @@ export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
-    private prisma: PrismaService,
-    private redis:  RedisService,
-    private jwt:    JwtService,
+    private prisma:  PrismaService,
+    private redis:   RedisService,
+    private jwt:     JwtService,
   ) {}
 
-  // ─── Register ──────────────────────────────────────────────────────────────
+  // ─── Register ───────────────────────────────────────────────────
 
   async register(dto: RegisterDto) {
-    const existing = await this.prisma.user.findUnique({ where: { email: dto.email } });
+    const existing = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
     if (existing) throw new ConflictException('Email already registered');
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
 
     const user = await this.prisma.user.create({
-      data:   { email: dto.email, phone: dto.phone, passwordHash },
-      select: { id:true, email:true, role:true, kycStatus:true, createdAt:true },
+      data: {
+        email:        dto.email,
+        phone:        dto.phone,
+        passwordHash,
+      },
+      select: {
+        id:        true,
+        email:     true,
+        role:      true,
+        kycStatus: true,
+        createdAt: true,
+      },
     });
 
     this.logger.log(`New user registered: ${user.id}`);
-
-    // Create audit log
-    await this.prisma.auditLog.create({
-      data: { userId: user.id, action: 'REGISTER', entityType: 'User', entityId: user.id },
-    });
-
     return this.issueTokens(user.id, user.email, user.role);
   }
 
-  // ─── Login ─────────────────────────────────────────────────────────────────
+  // ─── Login ──────────────────────────────────────────────────────
 
   async login(dto: LoginDto, ip: string) {
-    // Rate limit: 5 failed attempts per IP per 15 min
     const failKey = `login:fail:${ip}`;
     const fails   = await this.redis.incr(failKey);
     if (fails === 1) await this.redis.expire(failKey, 900);
-    if (fails > 5)   throw new UnauthorizedException('Too many attempts. Try again in 15 minutes.');
+    if (fails > 5)  throw new UnauthorizedException('Too many attempts. Try again in 15 minutes.');
 
-    const user = await this.prisma.user.findUnique({ where: { email: dto.email } });
-    if (!user)            throw new UnauthorizedException('Invalid credentials');
-    if (!user.isActive)   throw new UnauthorizedException('Account suspended');
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
 
-    const ok = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!ok) throw new UnauthorizedException('Invalid credentials');
+    if (!user)          throw new UnauthorizedException('Invalid credentials');
+    if (!user.isActive) throw new UnauthorizedException('Account suspended');
 
-    // 2FA check
+    const passwordOk = await bcrypt.compare(dto.password, user.passwordHash);
+    if (!passwordOk) throw new UnauthorizedException('Invalid credentials');
+
     if (user.twoFaEnabled) {
-      if (!dto.totpCode) throw new UnauthorizedException('2FA code required');
+      if (!dto.totpCode) {
+        throw new UnauthorizedException('2FA code required');
+      }
       const valid = speakeasy.totp.verify({
         secret:   user.twoFaSecret!,
         encoding: 'base32',
@@ -74,50 +87,35 @@ export class AuthService {
 
     await this.redis.del(failKey);
     this.logger.log(`User logged in: ${user.id}`);
-
-    // Audit log
-    await this.prisma.auditLog.create({
-      data: { userId: user.id, action: 'LOGIN', entityType: 'User', entityId: user.id, ipAddress: ip },
-    });
-
     return this.issueTokens(user.id, user.email, user.role);
   }
 
-  // ─── Refresh ───────────────────────────────────────────────────────────────
+  // ─── Refresh ────────────────────────────────────────────────────
 
   async refresh(token: string) {
     const stored = await this.redis.get(`refresh:${token}`);
     if (!stored) throw new UnauthorizedException('Refresh token expired or invalid');
 
     const { userId } = JSON.parse(stored);
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user || !user.isActive) throw new UnauthorizedException('User not found or suspended');
 
-    // Rotation — delete old, issue new
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('User not found or suspended');
+    }
+
     await this.redis.del(`refresh:${token}`);
     return this.issueTokens(user.id, user.email, user.role);
   }
 
-  // ─── Logout ────────────────────────────────────────────────────────────────
+  // ─── Logout ─────────────────────────────────────────────────────
 
-  async logout(userId: string, refreshToken: string, accessToken?: string) {
-    // Delete refresh token from Redis
+  async logout(userId: string, refreshToken: string) {
     await this.redis.del(`refresh:${refreshToken}`);
-
-    // Blacklist the access token for its remaining TTL (~15 min)
-    if (accessToken) {
-      await this.redis.set(`blacklist:${accessToken}`, '1', 900);
-    }
-
-    await this.prisma.auditLog.create({
-      data: { userId, action: 'LOGOUT', entityType: 'User', entityId: userId },
-    });
-
     this.logger.log(`User logged out: ${userId}`);
     return { message: 'Logged out successfully' };
   }
 
-  // ─── Get current user ──────────────────────────────────────────────────────
+  // ─── Get Me (full DB lookup — never returns cached/JWT-only data) ─
 
   async getMe(userId: string) {
     const user = await this.prisma.user.findUnique({
@@ -128,36 +126,49 @@ export class AuthService {
         phone:        true,
         role:         true,
         kycStatus:    true,
+        riskScore:    true,
         twoFaEnabled: true,
         isActive:     true,
         createdAt:    true,
+        updatedAt:    true,
       },
     });
     if (!user) throw new NotFoundException('User not found');
     return user;
   }
 
-  // ─── 2FA Setup ─────────────────────────────────────────────────────────────
+  // ─── 2FA Setup ──────────────────────────────────────────────────
 
   async setup2FA(userId: string) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user)              throw new NotFoundException('User not found');
-    if (user.twoFaEnabled)  throw new BadRequestException('2FA already enabled');
+    const secret = speakeasy.generateSecret({
+      name:   'Stablecoin Ecosystem',
+      length: 32,
+    });
 
-    const secret = speakeasy.generateSecret({ name: 'Stablecoin Ecosystem', length: 32 });
+    await this.redis.set(
+      `2fa:pending:${userId}`,
+      secret.base32,
+      300,
+    );
 
-    // Store temporarily — 5 min window to verify
-    await this.redis.set(`2fa:pending:${userId}`, secret.base32, 300);
-
-    return { secret: secret.base32, otpauthUrl: secret.otpauth_url };
+    return {
+      secret:     secret.base32,
+      qrUri:      secret.otpauth_url,
+      otpauthUrl: secret.otpauth_url,
+    };
   }
 
   async verify2FA(userId: string, token: string) {
     const secret = await this.redis.get(`2fa:pending:${userId}`);
-    if (!secret) throw new BadRequestException('2FA setup expired. Start again.');
+    if (!secret) throw new BadRequestException('2FA setup expired. Start setup again.');
 
-    const valid = speakeasy.totp.verify({ secret, encoding: 'base32', token, window: 1 });
-    if (!valid) throw new BadRequestException('Invalid code');
+    const valid = speakeasy.totp.verify({
+      secret,
+      encoding: 'base32',
+      token,
+      window:   1,
+    });
+    if (!valid) throw new BadRequestException('Invalid 2FA code');
 
     await this.prisma.user.update({
       where: { id: userId },
@@ -170,7 +181,8 @@ export class AuthService {
 
   async disable2FA(userId: string, token: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user || !user.twoFaEnabled) throw new BadRequestException('2FA not enabled');
+    if (!user) throw new NotFoundException('User not found');
+    if (!user.twoFaEnabled) throw new BadRequestException('2FA is not enabled');
 
     const valid = speakeasy.totp.verify({
       secret:   user.twoFaSecret!,
@@ -188,29 +200,27 @@ export class AuthService {
     return { message: '2FA disabled successfully' };
   }
 
-  // ─── Change password ───────────────────────────────────────────────────────
+  // ─── Change password ─────────────────────────────────────────────
 
   async changePassword(userId: string, currentPassword: string, newPassword: string) {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
 
     const ok = await bcrypt.compare(currentPassword, user.passwordHash);
-    if (!ok) throw new UnauthorizedException('Current password incorrect');
+    if (!ok) throw new UnauthorizedException('Current password is incorrect');
+
+    if (newPassword.length < 8) {
+      throw new BadRequestException('New password must be at least 8 characters');
+    }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
-    await this.prisma.user.update({ where: { id: userId }, data: { passwordHash } });
+    await this.prisma.user.update({ where:{ id:userId }, data:{ passwordHash } });
 
-    // Invalidate all existing sessions
-    await this.redis.del(`refresh:*`);
-
-    await this.prisma.auditLog.create({
-      data: { userId, action: 'PASSWORD_CHANGE', entityType: 'User', entityId: userId },
-    });
-
-    return { message: 'Password changed successfully. Please log in again.' };
+    this.logger.log(`Password changed for user: ${userId}`);
+    return { message: 'Password changed successfully' };
   }
 
-  // ─── Token issuing ─────────────────────────────────────────────────────────
+  // ─── Token issuing ───────────────────────────────────────────────
 
   private async issueTokens(userId: string, email: string, role: string) {
     const payload = { sub: userId, email, role };
@@ -224,7 +234,7 @@ export class AuthService {
     await this.redis.set(
       `refresh:${refreshToken}`,
       JSON.stringify({ userId }),
-      60 * 60 * 24 * 7,   // 7 days
+      60 * 60 * 24 * 7, // 7 days
     );
 
     return { accessToken, refreshToken };

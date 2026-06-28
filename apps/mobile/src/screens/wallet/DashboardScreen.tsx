@@ -1,257 +1,318 @@
-import React, { useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, RefreshControl,
-  TouchableOpacity, Dimensions,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  RefreshControl, StatusBar, Platform,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import { useDispatch, useSelector } from 'react-redux';
+import { LinearGradient }                from 'expo-linear-gradient';
+import { SafeAreaView }                  from 'react-native-safe-area-context';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useDispatch, useSelector }      from 'react-redux';
+import { Ionicons }                      from '@expo/vector-icons';
+import { TokenIcon }    from '../../components/ui/TokenIcon';
+import { ChainBadge }   from '../../components/ui/ChainBadge';
+import { Badge }        from '../../components/ui/Badge';
+import { Skeleton }     from '../../components/ui/Skeleton';
+import { colors, typography, spacing, radius, shadow } from '../../theme';
 import { fetchBalances, fetchTransactions } from '../../store/slices/walletSlice';
-import { AppDispatch, RootState } from '../../store';
-import { TokenIcon }  from '../../components/ui/TokenIcon';
-import { ChainBadge } from '../../components/ui/ChainBadge';
-import { Badge }      from '../../components/ui/Badge';
-import { colors, spacing, typography, radius } from '../../theme';
+import type { AppDispatch, RootState }      from '../../store';
 
-const { width } = Dimensions.get('window');
+const TOKEN_META: Record<string, { name: string; color: string; glowColor: string }> = {
+  INRX:  { name: 'e-Rupee',  color: colors.teal,   glowColor: 'rgba(0,212,170,0.15)' },
+  EGOLD: { name: 'e-Gold',   color: colors.gold,   glowColor: 'rgba(245,200,66,0.15)' },
+  ESLVR: { name: 'e-Silver', color: colors.silver, glowColor: 'rgba(192,192,216,0.15)' },
+};
 
-function ActionButton({ icon, label, onPress }: { icon:string; label:string; onPress:()=>void }) {
-  return (
-    <TouchableOpacity style={styles.actionBtn} onPress={onPress} activeOpacity={0.75}>
-      <LinearGradient
-        colors={[colors.surface, colors.bgTertiary]}
-        style={styles.actionGradient}
-      >
-        <Text style={styles.actionIcon}>{icon}</Text>
-      </LinearGradient>
-      <Text style={styles.actionLabel}>{label}</Text>
-    </TouchableOpacity>
-  );
+function timeOfDay() {
+  const h = new Date().getHours();
+  return h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening';
+}
+function fmt(n: number) {
+  if (!n || isNaN(n)) return '0.00';
+  return n.toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+}
+function shortAddr(s: string) {
+  if (!s || s.length < 12) return s;
+  return `${s.slice(0, 6)}…${s.slice(-4)}`;
+}
+function timeAgo(d: string) {
+  const diff = Date.now() - new Date(d).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
-function BalanceCard({ item }: { item:any }) {
-  const change = (Math.random() * 4 - 2).toFixed(2);
-  const isPos  = parseFloat(change) >= 0;
-  return (
-    <TouchableOpacity style={styles.balanceCard} activeOpacity={0.88}>
-      <View style={styles.balanceCardTop}>
-        <TokenIcon token={item.symbol} size={40} />
-        <View style={{ flex:1, marginLeft:12 }}>
-          <Text style={styles.tokenName}>{item.symbol}</Text>
-          <ChainBadge chain={item.chain} />
-        </View>
-        <Badge label={isPos ? `+${change}%` : `${change}%`} variant={isPos ? 'success' : 'error'} />
-      </View>
-      <View style={styles.balanceCardBottom}>
-        <Text style={styles.balanceAmt}>{parseFloat(item.balance).toLocaleString('en-IN', {maximumFractionDigits:4})}</Text>
-        <Text style={styles.tokenSymbol}>{item.symbol}</Text>
-      </View>
-    </TouchableOpacity>
-  );
-}
-
-function TxRow({ tx }: { tx:any }) {
-  const isSend    = tx.type === 'SEND';
-  const isBridge  = tx.type?.includes('BRIDGE');
-  const icon      = isBridge ? '⇄' : isSend ? '↑' : '↓';
-  const iconColor = isBridge ? colors.polygon : isSend ? colors.error : colors.success;
-  const amtColor  = isSend ? colors.error : colors.success;
-  const amtSign   = isSend ? '-' : '+';
-  const timeStr   = tx.createdAt ? new Date(tx.createdAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}) : '';
-
-  return (
-    <TouchableOpacity style={styles.txRow} activeOpacity={0.8}>
-      <View style={[styles.txIconWrap, { backgroundColor: iconColor+'22' }]}>
-        <Text style={[styles.txIcon, { color: iconColor }]}>{icon}</Text>
-      </View>
-      <View style={styles.txInfo}>
-        <Text style={styles.txType}>{isBridge?'Bridge Transfer':isSend?'Sent':'Received'}</Text>
-        <Text style={styles.txMeta} numberOfLines={1}>
-          {tx.txHash ? `${tx.txHash.slice(0,8)}...${tx.txHash.slice(-6)}` : 'Pending'} · {timeStr}
-        </Text>
-      </View>
-      <View style={styles.txRight}>
-        <Text style={[styles.txAmt, { color: amtColor }]}>
-          {amtSign}{parseFloat(tx.amount??0).toLocaleString('en-IN',{maximumFractionDigits:2})}
-        </Text>
-        <Text style={styles.txToken}>{tx.tokenSymbol ?? ''}</Text>
-      </View>
-    </TouchableOpacity>
-  );
-}
-
-export function DashboardScreen({ navigation }: any) {
-  const dispatch  = useDispatch<AppDispatch>();
+export default function DashboardScreen() {
+  const navigation = useNavigation<any>();
+  const dispatch   = useDispatch<AppDispatch>();
   const { balances, transactions, loading } = useSelector((s: RootState) => s.wallet);
-  const { user }  = useSelector((s: RootState) => s.auth);
-  const [refreshing, setRefreshing] = React.useState(false);
+  const { user }   = useSelector((s: RootState) => s.auth);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const load = useCallback(async () => {
-    await Promise.all([dispatch(fetchBalances()), dispatch(fetchTransactions())]);
+  // Derive display name from user data — never shows raw email string
+  const displayName = (() => {
+    if (!user) return 'Welcome';
+    const u = user as any;
+    if (u.fullName) return u.fullName;
+    if (u.name)     return u.name;
+    const local = (u.email ?? '').split('@')[0] ?? '';
+    // Strip trailing digits: sourabhgupta1221 → Sourabh Gupta style
+    const clean = local.replace(/[0-9]/g, '').replace(/([a-z])([A-Z])/g, '$1 $2');
+    return clean.charAt(0).toUpperCase() + clean.slice(1);
+  })();
+
+  const initial = displayName.charAt(0).toUpperCase();
+
+  const load = useCallback(() => {
+    dispatch(fetchBalances());
+    dispatch(fetchTransactions({ page: 1, limit: 5 }));
   }, [dispatch]);
 
-  useEffect(() => { load(); }, []);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await Promise.all([dispatch(fetchBalances()), dispatch(fetchTransactions({ page: 1, limit: 5 }))]);
+    setRefreshing(false);
+  };
 
-  const totalINR = balances
-    .filter(b => b.symbol === 'INRX')
-    .reduce((s, b) => s + parseFloat(b.balance ?? 0), 0);
+  const aggregated = ['INRX', 'EGOLD', 'ESLVR'].map(sym => {
+    const rows  = (balances ?? []).filter((b: any) => b.symbol === sym);
+    const total = rows.reduce((s: number, r: any) => s + parseFloat(r.balance || '0'), 0);
+    return { sym, total, chains: rows };
+  });
+
+  const portfolioINR = aggregated.reduce((sum, t) => {
+    if (t.sym === 'INRX')  return sum + t.total;
+    if (t.sym === 'EGOLD') return sum + t.total * 5900;
+    if (t.sym === 'ESLVR') return sum + t.total * 75;
+    return sum;
+  }, 0);
+
+  const recentTxs = (transactions ?? []).slice(0, 5);
+  const isLoading = loading && aggregated.every(t => t.total === 0);
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
       <ScrollView
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.teal} />}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.teal} colors={[colors.teal]} />}
+        contentContainerStyle={{ paddingBottom: 100 }}
       >
-        {/* Header */}
-        <LinearGradient colors={[colors.bgSecondary, colors.bg]} style={styles.header}>
-          <View style={styles.headerRow}>
-            <View>
-              <Text style={styles.greeting}>Good morning</Text>
-              <Text style={styles.userName}>{user?.email?.split('@')[0] ?? 'User'}</Text>
-            </View>
-            <TouchableOpacity style={styles.avatar} onPress={() => navigation.navigate('Profile')}>
-              <Text style={styles.avatarText}>{(user?.email?.[0] ?? 'U').toUpperCase()}</Text>
+        {/* Top bar */}
+        <View style={styles.topBar}>
+          <View>
+            <Text style={styles.greeting}>Good {timeOfDay()}</Text>
+            <Text style={styles.userName} numberOfLines={1}>{displayName}</Text>
+          </View>
+          <View style={styles.topRight}>
+            <TouchableOpacity style={styles.topBtn} onPress={() => navigation.navigate('Notifications')} hitSlop={{ top:8,bottom:8,left:8,right:8 }} activeOpacity={0.7}>
+              <Ionicons name="notifications-outline" size={20} color={colors.text} />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.avatarBtn} onPress={() => navigation.navigate('ProfileTab')} hitSlop={{ top:8,bottom:8,left:8,right:8 }} activeOpacity={0.7}>
+              <Text style={styles.avatarText}>{initial}</Text>
             </TouchableOpacity>
           </View>
+        </View>
 
-          {/* Portfolio value */}
-          <View style={styles.portfolioCard}>
-            <LinearGradient
-              colors={[colors.teal+'22', colors.teal+'08']}
-              style={styles.portfolioGradient}
-              start={{ x:0, y:0 }} end={{ x:1, y:1 }}
-            >
-              <Text style={styles.portfolioLabel}>Total Portfolio</Text>
-              <Text style={styles.portfolioValue}>
-                ₹{totalINR.toLocaleString('en-IN', { maximumFractionDigits:2 })}
-              </Text>
-              <View style={styles.portfolioMeta}>
-                <Badge label="+2.4% this week" variant="teal" />
-                <Text style={styles.portfolioUSD}>
-                  ≈ ${(totalINR / 84).toFixed(0)} USD
-                </Text>
-              </View>
-              {/* Subtle reserve badge */}
-              <View style={styles.reserveBadge}>
-                <View style={styles.reserveDot} />
-                <Text style={styles.reserveText}>102% collateralized</Text>
-              </View>
-            </LinearGradient>
+        {/* Hero balance card */}
+        <LinearGradient colors={['#1A2235', '#0D1520']} start={{x:0,y:0}} end={{x:1,y:1}} style={styles.heroCard}>
+          <View style={styles.heroLabelRow}>
+            <Text style={styles.heroLabel}>Total Portfolio Value</Text>
+            <TouchableOpacity onPress={load} hitSlop={{top:8,bottom:8,left:8,right:8}}>
+              <Ionicons name="refresh-outline" size={16} color={colors.textTertiary} />
+            </TouchableOpacity>
+          </View>
+          {isLoading ? (
+            <Skeleton width={180} height={44} style={{ marginVertical: 8 }} />
+          ) : (
+            <Text style={styles.heroValue}>₹{fmt(portfolioINR)}</Text>
+          )}
+          <View style={styles.quickRow}>
+            {[
+              { icon: 'arrow-up-outline',       label: 'Send',    screen: 'Send' },
+              { icon: 'arrow-down-outline',      label: 'Receive', screen: 'Receive' },
+              { icon: 'swap-horizontal-outline', label: 'Bridge',  screen: 'Bridge' },
+              { icon: 'qr-code-outline',         label: 'Pay',     screen: 'PayQR' },
+            ].map(a => (
+              <TouchableOpacity key={a.label} style={styles.quickBtn} onPress={() => navigation.navigate(a.screen as any)} activeOpacity={0.7}>
+                <View style={styles.quickIcon}>
+                  <Ionicons name={a.icon as any} size={20} color={colors.teal} />
+                </View>
+                <Text style={styles.quickLabel}>{a.label}</Text>
+              </TouchableOpacity>
+            ))}
           </View>
         </LinearGradient>
 
-        {/* Actions */}
-        <View style={styles.actionsRow}>
-          <ActionButton icon="↑"  label="Send"    onPress={() => navigation.navigate('Send')}    />
-          <ActionButton icon="↓"  label="Receive" onPress={() => navigation.navigate('Receive')} />
-          <ActionButton icon="⇄"  label="Bridge"  onPress={() => navigation.navigate('Bridge')}  />
-          <ActionButton icon="⊙"  label="Scan"    onPress={() => navigation.navigate('Scan')}    />
+        {/* Assets section */}
+        <View style={styles.sectionRow}>
+          <Text style={styles.sectionTitle}>Assets</Text>
+          <TouchableOpacity onPress={() => navigation.navigate('TransactionTab')} hitSlop={{top:8,bottom:8,left:8,right:8}}>
+            <Text style={styles.seeAll}>View all</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Token balances */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Token Balances</Text>
-            <TouchableOpacity><Text style={styles.sectionLink}>All chains →</Text></TouchableOpacity>
-          </View>
-          {balances.length === 0 ? (
-            <View style={styles.emptyCard}>
-              <Text style={styles.emptyIcon}>◎</Text>
-              <Text style={styles.emptyTitle}>No balances yet</Text>
-              <Text style={styles.emptyText}>Create or import a wallet to get started</Text>
-              <TouchableOpacity style={styles.emptyBtn} onPress={() => navigation.navigate('CreateWallet')}>
-                <Text style={styles.emptyBtnText}>Create Wallet</Text>
-              </TouchableOpacity>
-            </View>
+        <View style={styles.assetList}>
+          {isLoading ? (
+            [1, 2, 3].map(i => <Skeleton key={i} width="100%" height={72} style={{ marginBottom: spacing.sm }} />)
           ) : (
-            <View style={styles.balancesList}>
-              {balances.slice(0,6).map((b, i) => <BalanceCard key={i} item={b} />)}
-            </View>
+            aggregated.map(t => (
+              <TouchableOpacity
+                key={t.sym}
+                style={styles.assetRow}
+                onPress={() => navigation.navigate('TokenDetail', { token: t.sym })}
+                activeOpacity={0.75}
+              >
+                <TokenIcon token={t.sym} size={46} />
+                <View style={{ flex: 1, marginLeft: spacing.md }}>
+                  <Text style={styles.assetName}>{TOKEN_META[t.sym]?.name}</Text>
+                  <View style={styles.chainRow}>
+                    {t.chains.slice(0, 4).map((c: any) => (
+                      <ChainBadge key={c.chain} chain={c.chain} size="xs" />
+                    ))}
+                    {t.chains.length === 0 && (
+                      <Text style={styles.noBalance}>No balance</Text>
+                    )}
+                  </View>
+                </View>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={styles.assetAmt}>{fmt(t.total)}</Text>
+                  <Text style={styles.assetSym}>{t.sym}</Text>
+                </View>
+              </TouchableOpacity>
+            ))
           )}
         </View>
 
-        {/* Recent transactions */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Recent Activity</Text>
-            <TouchableOpacity onPress={() => navigation.navigate('Transactions')}>
-              <Text style={styles.sectionLink}>View all →</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.txList}>
-            {transactions.length === 0 ? (
-              <View style={styles.emptyTx}>
-                <Text style={styles.emptyTxText}>No transactions yet</Text>
-              </View>
-            ) : (
-              transactions.slice(0,8).map((tx, i) => <TxRow key={i} tx={tx} />)
-            )}
-          </View>
+        {/* Recent activity */}
+        <View style={styles.sectionRow}>
+          <Text style={styles.sectionTitle}>Recent Activity</Text>
+          <TouchableOpacity onPress={() => navigation.navigate('TransactionTab')} hitSlop={{top:8,bottom:8,left:8,right:8}}>
+            <Text style={styles.seeAll}>See all</Text>
+          </TouchableOpacity>
         </View>
 
-        <View style={{ height: 100 }} />
+        <View style={styles.txList}>
+          {isLoading ? (
+            [1, 2, 3].map(i => <Skeleton key={i} width="100%" height={62} style={{ marginBottom: spacing.xs }} />)
+          ) : recentTxs.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Ionicons name="receipt-outline" size={28} color={colors.textTertiary} />
+              <Text style={styles.emptyText}>No transactions yet</Text>
+              <Text style={styles.emptySubText}>Your activity will appear here</Text>
+            </View>
+          ) : (
+            recentTxs.map((tx: any) => {
+              const isSend   = tx.type === 'SEND';
+              const isBridge = (tx.type ?? '').startsWith('BRIDGE');
+              const iconName = isSend ? 'arrow-up' : isBridge ? 'swap-horizontal' : 'arrow-down';
+              const iconBg   = isSend ? colors.errorBg : isBridge ? colors.tealBg : colors.successBg;
+              const iconCol  = isSend ? colors.error : isBridge ? colors.teal : colors.success;
+              const amtColor = isSend ? colors.error : colors.success;
+              const sign     = isSend ? '-' : '+';
+              return (
+                <TouchableOpacity
+                  key={tx.id}
+                  style={styles.txRow}
+                  onPress={() => navigation.navigate('TransactionDetail', { id: tx.id })}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.txIcon, { backgroundColor: iconBg }]}>
+                    <Ionicons name={iconName as any} size={16} color={iconCol} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.txTitle}>
+                      {isSend ? 'Sent' : isBridge ? 'Bridged' : 'Received'} {tx.tokenSymbol}
+                    </Text>
+                    <Text style={styles.txMeta}>
+                      {shortAddr(isSend ? tx.toAddress : tx.fromAddress)} · {timeAgo(tx.createdAt)}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={[styles.txAmt, { color: amtColor }]}>
+                      {sign}{fmt(parseFloat(tx.amount ?? '0'))}
+                    </Text>
+                    <Badge
+                      label={tx.status}
+                      variant={tx.status === 'CONFIRMED' ? 'success' : tx.status === 'PENDING' ? 'warning' : 'error'}
+                    />
+                  </View>
+                </TouchableOpacity>
+              );
+            })
+          )}
+        </View>
       </ScrollView>
-    </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container:       { flex:1, backgroundColor:colors.bg },
-  header:          { paddingHorizontal:spacing.lg, paddingTop:60, paddingBottom:spacing.lg },
-  headerRow:       { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:spacing.xl },
-  greeting:        { ...typography.sm, color:colors.textSecondary },
-  userName:        { ...typography.h3, color:colors.text, textTransform:'capitalize' },
-  avatar:          { width:42, height:42, borderRadius:21, backgroundColor:colors.tealBg,
-                     borderWidth:1.5, borderColor:colors.teal, alignItems:'center', justifyContent:'center' },
-  avatarText:      { color:colors.teal, fontSize:16, fontWeight:'700' },
-  portfolioCard:   { borderRadius:radius.xxl, overflow:'hidden', borderWidth:1, borderColor:colors.tealBorder },
-  portfolioGradient:{ padding:spacing.xl },
-  portfolioLabel:  { ...typography.xs, color:colors.teal, letterSpacing:1, textTransform:'uppercase', marginBottom:8 },
-  portfolioValue:  { fontSize:38, fontWeight:'300', color:colors.text, letterSpacing:-1.5, marginBottom:12, fontFamily:'monospace' },
-  portfolioMeta:   { flexDirection:'row', alignItems:'center', justifyContent:'space-between' },
-  portfolioUSD:    { ...typography.sm, color:colors.textSecondary },
-  reserveBadge:    { flexDirection:'row', alignItems:'center', marginTop:12, gap:6 },
-  reserveDot:      { width:6, height:6, borderRadius:3, backgroundColor:colors.success },
-  reserveText:     { ...typography.xs, color:colors.textSecondary },
-  actionsRow:      { flexDirection:'row', paddingHorizontal:spacing.lg, paddingVertical:spacing.lg,
-                     gap:spacing.sm, justifyContent:'space-between' },
-  actionBtn:       { flex:1, alignItems:'center', gap:6 },
-  actionGradient:  { width:56, height:56, borderRadius:radius.lg, alignItems:'center', justifyContent:'center',
-                     borderWidth:1, borderColor:colors.border },
-  actionIcon:      { fontSize:22, color:colors.text },
-  actionLabel:     { ...typography.xs, color:colors.textSecondary, fontWeight:'600' },
-  section:         { paddingHorizontal:spacing.lg, marginBottom:spacing.xl },
-  sectionHeader:   { flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:spacing.md },
-  sectionTitle:    { ...typography.h4, color:colors.text },
-  sectionLink:     { ...typography.sm, color:colors.teal },
-  balancesList:    { gap:spacing.sm },
-  balanceCard:     { backgroundColor:colors.surface, borderRadius:radius.xl,
-                     borderWidth:1, borderColor:colors.border, padding:spacing.lg },
-  balanceCardTop:  { flexDirection:'row', alignItems:'center', marginBottom:spacing.md },
-  tokenName:       { ...typography.sm, color:colors.text, fontWeight:'700', marginBottom:4 },
-  balanceCardBottom:{ flexDirection:'row', alignItems:'baseline', gap:6 },
-  balanceAmt:      { fontSize:22, fontWeight:'600', color:colors.text, fontFamily:'monospace' },
-  tokenSymbol:     { ...typography.sm, color:colors.textSecondary },
-  txList:          { backgroundColor:colors.surface, borderRadius:radius.xl, borderWidth:1, borderColor:colors.border, overflow:'hidden' },
-  txRow:           { flexDirection:'row', alignItems:'center', padding:spacing.lg,
-                     borderBottomWidth:1, borderBottomColor:colors.border+'66' },
-  txIconWrap:      { width:38, height:38, borderRadius:19, alignItems:'center', justifyContent:'center', marginRight:12 },
-  txIcon:          { fontSize:16, fontWeight:'700' },
-  txInfo:          { flex:1 },
-  txType:          { ...typography.body, color:colors.text, fontWeight:'500', marginBottom:2 },
-  txMeta:          { ...typography.xs, color:colors.textTertiary, fontFamily:'monospace' },
-  txRight:         { alignItems:'flex-end' },
-  txAmt:           { ...typography.body, fontWeight:'700', fontFamily:'monospace' },
-  txToken:         { ...typography.xs, color:colors.textTertiary, marginTop:2 },
-  emptyCard:       { backgroundColor:colors.surface, borderRadius:radius.xl, borderWidth:1,
-                     borderColor:colors.border, padding:spacing.xxxl, alignItems:'center' },
-  emptyIcon:       { fontSize:36, marginBottom:12, color:colors.textTertiary },
-  emptyTitle:      { ...typography.h4, color:colors.text, marginBottom:6 },
-  emptyText:       { ...typography.sm, color:colors.textSecondary, textAlign:'center', marginBottom:spacing.lg },
-  emptyBtn:        { backgroundColor:colors.tealBg, borderRadius:radius.lg, paddingHorizontal:24, paddingVertical:12,
-                     borderWidth:1, borderColor:colors.teal },
-  emptyBtnText:    { ...typography.sm, color:colors.teal, fontWeight:'700' },
-  emptyTx:         { padding:spacing.xl, alignItems:'center' },
-  emptyTxText:     { ...typography.sm, color:colors.textTertiary },
+  safe: { flex: 1, backgroundColor: colors.bg },
+  topBar: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: spacing.xl, paddingVertical: spacing.md,
+  },
+  greeting:  { ...typography.xs, color: colors.textTertiary },
+  userName:  { ...typography.h3, color: colors.text, marginTop: 2, maxWidth: 180 },
+  topRight:  { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
+  topBtn: {
+    width: 42, height: 42, borderRadius: 21,
+    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  avatarBtn: {
+    width: 42, height: 42, borderRadius: 21,
+    backgroundColor: colors.tealBg2, borderWidth: 1.5, borderColor: colors.teal,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  avatarText: { fontSize: 16, fontWeight: '700' as const, color: colors.teal },
+  heroCard: {
+    marginHorizontal: spacing.xl, borderRadius: radius.xxl,
+    padding: spacing.xl, borderWidth: 1, borderColor: colors.border, ...shadow.lg,
+  },
+  heroLabelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.xs },
+  heroLabel: { ...typography.sm, color: colors.textTertiary },
+  heroValue: { ...typography.display, color: colors.text, marginBottom: spacing.xl },
+  quickRow:  { flexDirection: 'row', justifyContent: 'space-between' },
+  quickBtn:  { alignItems: 'center', gap: spacing.xs, flex: 1 },
+  quickIcon: {
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: colors.tealBg2, borderWidth: 1, borderColor: colors.tealBorder,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  quickLabel: { ...typography.xs, color: colors.textSecondary, fontWeight: '600' as const },
+  sectionRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: spacing.xl, marginTop: spacing.xl, marginBottom: spacing.md,
+  },
+  sectionTitle: { ...typography.h4, color: colors.text },
+  seeAll:       { ...typography.sm, color: colors.teal, fontWeight: '600' as const },
+  assetList:    { paddingHorizontal: spacing.xl, gap: spacing.sm },
+  assetRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.surface, padding: spacing.md,
+    borderRadius: radius.xl, borderWidth: 1, borderColor: colors.border,
+  },
+  assetName:  { ...typography.h5, color: colors.text },
+  chainRow:   { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
+  noBalance:  { ...typography.xs, color: colors.textTertiary },
+  assetAmt:   { ...typography.h5, color: colors.text },
+  assetSym:   { ...typography.xs, color: colors.textTertiary, marginTop: 2 },
+  txList:     { paddingHorizontal: spacing.xl, marginTop: spacing.xs },
+  txRow: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
+    paddingVertical: spacing.sm + 2, borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  txIcon:     { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+  txTitle:    { ...typography.sm, color: colors.text, fontWeight: '600' as const },
+  txMeta:     { ...typography.xs, color: colors.textTertiary, marginTop: 2 },
+  txAmt:      { ...typography.sm, fontWeight: '700' as const, marginBottom: 2 },
+  emptyBox:   { alignItems: 'center', paddingVertical: spacing.xxxl, gap: spacing.sm },
+  emptyText:  { ...typography.h5, color: colors.textSecondary },
+  emptySubText:{ ...typography.xs, color: colors.textTertiary },
 });
