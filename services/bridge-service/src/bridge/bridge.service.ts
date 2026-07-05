@@ -293,9 +293,9 @@ export class BridgeService {
 
   getBridgeAddress(chain: string): string {
     const map: Record<string,string> = {
-      ethereum: process.env.SEPOLIA_BRIDGE_V2_ADDRESS   || process.env.ETH_BRIDGE_V2_ADDRESS!,
+      ethereum: process.env.ETH_BRIDGE_V2_ADDRESS   || process.env.ETH_BRIDGE_V2_ADDRESS!,
       bsc:      process.env.BSC_BRIDGE_V2_ADDRESS!,
-      polygon:  process.env.POLYGONMUMBAI_BRIDGE_V2_ADDRESS || process.env.POLYGON_BRIDGE_V2_ADDRESS!,
+      polygon:  process.env.POLYGON_BRIDGE_V2_ADDRESS || process.env.POLYGON_BRIDGE_V2_ADDRESS!,
     };
     if (!map[chain]) throw new BadRequestException(`Bridge not configured for chain: ${chain}`);
     return map[chain];

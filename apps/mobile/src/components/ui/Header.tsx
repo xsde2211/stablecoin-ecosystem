@@ -1,7 +1,10 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, StatusBar } from 'react-native';
-import { Ionicons }      from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import {
+  View, Text, TouchableOpacity, StyleSheet,
+  Platform, StatusBar,
+} from 'react-native';
+import { Ionicons }          from '@expo/vector-icons';
+import { useNavigation }     from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, typography, spacing, radius } from '../../theme';
 
@@ -14,32 +17,52 @@ interface Props {
   rightLabel?:   string;
 }
 
-export function Header({ title, subtitle, showBack = true, rightIcon, onRightPress, rightLabel }: Props) {
-  const navigation = useNavigation<any>();
-  const insets     = useSafeAreaInsets();
-  const topPad     = Platform.OS === 'ios' ? insets.top : (StatusBar.currentHeight ?? 0) + 8;
-  const canGoBack  = navigation.canGoBack?.() ?? false;
+export function Header({
+  title,
+  subtitle,
+  showBack = true,
+  rightIcon,
+  onRightPress,
+  rightLabel,
+}: Props) {
+  const nav    = useNavigation<any>();
+  const insets = useSafeAreaInsets();
+  const canGoBack = nav.canGoBack?.() ?? false;
+
+  // The Header itself owns the status-bar / notch clearance.
+  // Screens must NOT also add top inset via SafeAreaView edges,
+  // otherwise the heading appears shifted down.
+  const topPad = Platform.OS === 'ios'
+    ? insets.top          // respects notch / Dynamic Island
+    : StatusBar.currentHeight ?? 24;  // Android status bar
 
   return (
-    <View style={[styles.container, { paddingTop: topPad + 4 }]}>
+    <View style={[styles.wrap, { paddingTop: topPad + 6 }]}>
       <View style={styles.row}>
+        {/* Left — back button */}
         <View style={styles.side}>
-          {showBack && canGoBack && (
+          {showBack && canGoBack ? (
             <TouchableOpacity
-              onPress={() => navigation.goBack()}
+              onPress={() => nav.goBack()}
               style={styles.iconBtn}
               hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
               activeOpacity={0.7}
             >
               <Ionicons name="chevron-back" size={22} color={colors.text} />
             </TouchableOpacity>
-          )}
+          ) : null}
         </View>
+
+        {/* Center — title */}
         <View style={styles.center}>
           <Text style={styles.title} numberOfLines={1}>{title}</Text>
-          {subtitle ? <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text> : null}
+          {subtitle ? (
+            <Text style={styles.subtitle} numberOfLines={1}>{subtitle}</Text>
+          ) : null}
         </View>
-        <View style={[styles.side, { alignItems: 'flex-end' }]}>
+
+        {/* Right — action */}
+        <View style={[styles.side, styles.sideRight]}>
           {rightIcon ? (
             <TouchableOpacity
               onPress={onRightPress}
@@ -50,7 +73,10 @@ export function Header({ title, subtitle, showBack = true, rightIcon, onRightPre
               <Ionicons name={rightIcon as any} size={20} color={colors.text} />
             </TouchableOpacity>
           ) : rightLabel ? (
-            <TouchableOpacity onPress={onRightPress} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+            <TouchableOpacity
+              onPress={onRightPress}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
               <Text style={styles.rightLabel}>{rightLabel}</Text>
             </TouchableOpacity>
           ) : null}
@@ -61,23 +87,30 @@ export function Header({ title, subtitle, showBack = true, rightIcon, onRightPre
 }
 
 const styles = StyleSheet.create({
-  container: {
+  wrap: {
     backgroundColor:   colors.bg,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
-    paddingBottom:     spacing.sm,
+    paddingBottom:     spacing.sm + 2,
   },
   row: {
     flexDirection:     'row',
     alignItems:        'center',
     paddingHorizontal: spacing.lg,
+    minHeight:         44,
   },
-  side:   { width: 44, alignItems: 'flex-start' },
-  center: { flex: 1, alignItems: 'center' },
+  side:      { width: 44 },
+  sideRight: { alignItems: 'flex-end' },
+  center:    { flex: 1, alignItems: 'center' },
   iconBtn: {
-    width: 40, height: 40, borderRadius: radius.full,
-    backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
-    alignItems: 'center', justifyContent: 'center',
+    width:           40,
+    height:          40,
+    borderRadius:    radius.full,
+    backgroundColor: colors.surface,
+    borderWidth:     1,
+    borderColor:     colors.border,
+    alignItems:      'center',
+    justifyContent:  'center',
   },
   title:      { ...typography.h4, color: colors.text },
   subtitle:   { ...typography.xs, color: colors.textSecondary, marginTop: 2 },

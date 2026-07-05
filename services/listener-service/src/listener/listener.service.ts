@@ -52,6 +52,9 @@ export class ListenerService implements OnModuleInit {
     // Set up real-time WebSocket listeners for EVM chains (where WSS available)
     await this.setupEVMWebsocketListeners();
 
+    // Watch plain token Transfer events (wallet sends/receives) on chains with WSS
+    await this.setupTokenTransferListeners();
+
     // Initialize last-block tracking for polling-based chains (TRON, fallback EVM)
     await this.initLastBlocks();
 
@@ -62,7 +65,7 @@ export class ListenerService implements OnModuleInit {
 
   private async setupEVMWebsocketListeners() {
     const wsConfigs = [
-      { chain:'ethereum', wsUrl: process.env.ETH_WS_RPC,     bridgeAddr: process.env.SEPOLIA_BRIDGE_V2_ADDRESS },
+      { chain:'ethereum', wsUrl: process.env.ETH_WS_RPC,     bridgeAddr: process.env.ETH_BRIDGE_V2_ADDRESS },
       { chain:'polygon',  wsUrl: process.env.POLYGON_WS_RPC, bridgeAddr: process.env.POLYGONAMOY_BRIDGE_V2_ADDRESS },
     ];
 
@@ -84,6 +87,214 @@ export class ListenerService implements OnModuleInit {
         this.logger.log(`WebSocket listener active for ${cfg.chain} bridge: ${cfg.bridgeAddr}`);
       } catch (err: any) {
         this.logger.error(`Failed to set up WS listener for ${cfg.chain}: ${err.message}`);
+      }
+    }
+  }
+
+  // ─── WebSocket listeners for plain token Transfer events (wallet send/receive) ─
+
+  private async setupTokenTransferListeners() {
+    const TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
+    const wsConfigs = [
+      { chain: 'ethereum', wsUrl: process.env.ETH_WS_RPC },
+      { chain: 'polygon',  wsUrl: process.env.POLYGON_WS_RPC },
+    ];
+
+    for (const cfg of wsConfigs) {
+      if (!cfg.wsUrl) {
+        this.logger.warn(`Skipping token WS listener for ${cfg.chain} — missing WS RPC`);
+        continue;
+      }
+
+      try {
+        const provider = new ethers.WebSocketProvider(cfg.wsUrl);
+
+        for (const symbol of TOKENS) {
+          const tokenAddr = this.getTokenAddress(cfg.chain, symbol);
+          if (!tokenAddr) {
+            this.logger.warn(`Skipping ${cfg.chain}/${symbol} token listener — address not configured`);
+            continue;
+          }
+
+          const contract = new ethers.Contract(tokenAddr, ERC20_TRANSFER_ABI, provider);
+          contract.on('Transfer', (from: string, to: string, value: bigint, event: any) => {
+            const txHash      = event?.log?.transactionHash ?? event?.transactionHash;
+            const blockNumber = event?.log?.blockNumber ?? event?.blockNumber ?? 0;
+            this.handleTokenTransfer(cfg.chain, symbol, from, to, value, txHash, blockNumber)
+              .catch(err => this.logger.error(`handleTokenTransfer error [${cfg.chain}/${symbol}]: ${err.message}`));
+          });
+
+          this.logger.log(`Token WS listener active for ${cfg.chain}/${symbol}: ${tokenAddr}`);
+        }
+      } catch (err: any) {
+        this.logger.error(`Failed to set up token WS listener for ${cfg.chain}: ${err.message}`);
+      }
+    }
+  }
+
+// ─── Shared handler — confirms sends, records receives, for any chain/token ───
+
+  private async handleTokenTransfer(
+    chain: string, symbol: string, from: string, to: string,
+    value: bigint, txHash: string, blockNumber: number,
+  ) {
+    if (!txHash) return;
+
+    const cacheKey = `token:transfer:${chain}:${txHash}:${symbol}`;
+    if (await this.redis.exists(cacheKey)) return;
+    await this.redis.set(cacheKey, '1', 86400);
+
+    const amount = ethers.formatUnits(value, 6);
+
+    // Normalize addresses — EVM addresses to lowercase, TRON stays base58
+    const fromNorm = chain === 'tron' ? this.normalizeTronAddress(from) : from.toLowerCase();
+    const toNorm   = chain === 'tron' ? this.normalizeTronAddress(to)   : to.toLowerCase();
+
+    // Side 1 — confirm the PENDING SEND row for the sender
+    // Match by txHash + status PENDING (the row was created by wallet.service sendToken)
+    const updated = await this.prisma.transaction.updateMany({
+      where: { txHash, status: 'PENDING' },
+      data:  { status: 'CONFIRMED', confirmedAt: new Date(), blockNumber: BigInt(blockNumber) },
+    });
+    if (updated.count > 0) {
+      this.logger.log(`[${chain}] Confirmed ${symbol} SEND tx ${txHash} (${amount})`);
+    }
+
+    // Side 2 — create RECEIVE row for the recipient wallet if it belongs to a user
+    // Use case-insensitive address match (mode: 'insensitive') for EVM chains
+    const wallet = chain === 'tron'
+      ? await this.prisma.wallet.findFirst({ where: { address: toNorm, chain } })
+      : await this.prisma.wallet.findFirst({
+          where: {
+            address: { equals: toNorm, mode: 'insensitive' },
+            chain,
+          },
+        });
+
+    if (!wallet) return; // recipient is not one of our users — nothing to record
+
+    try {
+      await this.prisma.transaction.create({
+        data: {
+          walletId:    wallet.id,
+          txHash,
+          chain,
+          type:        'RECEIVE',
+          amount,
+          tokenSymbol: symbol,
+          fromAddress: fromNorm,
+          toAddress:   toNorm,
+          status:      'CONFIRMED',
+          confirmedAt: new Date(),
+          blockNumber: BigInt(blockNumber),
+        },
+      });
+      this.logger.log(`[${chain}] Recorded RECEIVE ${symbol} ${txHash} → wallet ${wallet.id} (user ${wallet.userId})`);
+    } catch (err: any) {
+      // @@unique([walletId, txHash]) — duplicate event delivery hits this; safe to ignore
+      if (!err.message?.includes('Unique constraint')) {
+        this.logger.error(`Failed to record RECEIVE ${txHash}: ${err.message}`);
+      }
+    }
+  }
+
+  
+  // ─── Polling fallback — runs for ALL EVM chains, not just BSC ─────────────────
+  //
+  // WS subscriptions (setupTokenTransferListeners) are fast when they work, but
+  // ethers WebSocketProvider connections can silently stop delivering events
+  // (idle timeouts, provider-side drops, reconnect failures) without throwing —
+  // so nothing in the app would ever see an error. Polling over plain HTTPS RPC
+  // is far more reliable and easy to debug, so it now runs for every EVM chain
+  // as the primary confirmation path; WS is just a low-latency bonus on top.
+
+  @Cron('*/15 * * * * *') // every 15 seconds
+  async pollEvmTokenTransfersAll() {
+    const chains: Array<[string, string | undefined]> = [
+      ['ethereum', process.env.ETH_RPC],
+      ['polygon',  process.env.POLYGON_RPC],
+      ['bsc',      process.env.BSC_RPC],
+    ];
+
+    for (const [chain, rpcUrl] of chains) {
+      if (!rpcUrl) {
+        this.logger.warn(`Skipping token polling for ${chain} — no RPC URL configured`);
+        continue;
+      }
+      try {
+        await this.pollEvmTokenTransfers(chain, rpcUrl);
+      } catch (err: any) {
+        this.logger.error(`${chain} token polling error: ${err.message}`);
+      }
+    }
+  }
+
+  private async pollEvmTokenTransfers(chain: string, rpcUrl: string) {
+    if (!rpcUrl) return;
+    const TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+
+    const currentBlock = await provider.getBlockNumber();
+    const key          = `${chain}_tokens`;
+    const fromBlock    = this.lastBlocks[key] ?? currentBlock - 20;
+    if (currentBlock <= fromBlock) return;
+
+    for (const symbol of TOKENS) {
+      const tokenAddr = this.getTokenAddress(chain, symbol);
+      if (!tokenAddr) {
+        this.logger.warn(`Skipping ${chain}/${symbol} poll — token address not configured`);
+        continue;
+      }
+
+      try {
+        const contract = new ethers.Contract(tokenAddr, ERC20_TRANSFER_ABI, provider);
+        const events   = await contract.queryFilter(contract.filters.Transfer(), fromBlock + 1, currentBlock);
+
+        if (events.length > 0) {
+          this.logger.debug(`[${chain}] Found ${events.length} ${symbol} Transfer event(s) in blocks ${fromBlock + 1}-${currentBlock}`);
+        }
+
+        for (const evt of events) {
+          const e = evt as ethers.EventLog;
+          this.logger.debug(`[${chain}] ${symbol} Transfer ${e.transactionHash}: ${e.args.from} → ${e.args.to} (${e.args.value})`);
+          await this.handleTokenTransfer(
+            chain, symbol, e.args.from, e.args.to, e.args.value, e.transactionHash, e.blockNumber,
+          );
+        }
+      } catch (err: any) {
+        this.logger.warn(`Token poll failed [${chain}/${symbol}]: ${err.message}`);
+      }
+    }
+
+    this.lastBlocks[key] = currentBlock;
+  }
+
+  // ─── Polling fallback — TRON (no native WSS event subscriptions) ──────────────
+
+  @Cron('*/10 * * * * *') // every 10 seconds
+  async pollTronTokenTransfers() {
+    const TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
+
+    for (const symbol of TOKENS) {
+      const tokenAddr = this.getTokenAddress('tron', symbol);
+      if (!tokenAddr) continue;
+
+      try {
+        const url = `${process.env.TRON_RPC}/v1/contracts/${tokenAddr}/events?event_name=Transfer&only_confirmed=true&limit=20`;
+        const res = await axios.get(url, {
+          headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+          timeout: 10000,
+        });
+
+        for (const evt of res.data?.data ?? []) {
+          const from  = this.normalizeTronAddress(evt.result?.from);
+          const to    = this.normalizeTronAddress(evt.result?.to);
+          const value = BigInt(evt.result?.value ?? '0');
+          this.logger.debug(`[tron] ${symbol} Transfer ${evt.transaction_id}: ${from} → ${to} (${value})`);
+          await this.handleTokenTransfer('tron', symbol, from, to, value, evt.transaction_id, evt.block ?? 0);
+        }
+      } catch (err: any) {
+        // Non-fatal — TronGrid event API may rate limit
       }
     }
   }
@@ -381,12 +592,30 @@ export class ListenerService implements OnModuleInit {
     return new ethers.JsonRpcProvider(map[chain]);
   }
 
+  private normalizeTronAddress(address?: string): string {
+    if (!address) return '';
+    try {
+      // TronGrid's contract-events API can return addresses in raw hex form
+      // (with or without the "41" TRON prefix) instead of base58. Our
+      // Wallet.address column always stores TRON addresses in base58 (T...),
+      // so normalize before comparing/storing, or the wallet lookup silently
+      // matches nothing and both the confirm and the receive-record steps fail.
+      if (address.startsWith('T')) return address; // already base58
+      const hex = address.startsWith('0x') ? address.slice(2) : address;
+      const withPrefix = hex.startsWith('41') ? hex : `41${hex}`;
+      return TronWeb.address.fromHex(withPrefix);
+    } catch (err: any) {
+      this.logger.warn(`Could not normalize TRON address "${address}": ${err.message}`);
+      return address;
+    }
+  }
+
   private getTokenAddress(chain: string, symbol: string): string | undefined {
     const map: Record<string,Record<string,string|undefined>> = {
       tron:     { INRX:process.env.TRON_INRX_ADDRESS,  EGOLD:process.env.TRON_EGOLD_ADDRESS,  ESLVR:process.env.TRON_ESLVR_ADDRESS },
-      ethereum: { INRX:process.env.SEPOLIA_INRX_ADDRESS, EGOLD:process.env.SEPOLIA_EGOLD_ADDRESS, ESLVR:process.env.SEPOLIA_ESLVR_ADDRESS },
+      ethereum: { INRX:process.env.ETH_INRX_ADDRESS, EGOLD:process.env.ETH_EGOLD_ADDRESS, ESLVR:process.env.ETH_ESLVR_ADDRESS },
       bsc:      { INRX:process.env.BSC_INRX_ADDRESS,    EGOLD:process.env.BSC_EGOLD_ADDRESS,    ESLVR:process.env.BSC_ESLVR_ADDRESS },
-      polygon:  { INRX:process.env.POLYGONAMOY_INRX_ADDRESS, EGOLD:process.env.POLYGONAMOY_EGOLD_ADDRESS, ESLVR:process.env.POLYGONAMOY_ESLVR_ADDRESS },
+      polygon:  { INRX:process.env.POLYGON_INRX_ADDRESS, EGOLD:process.env.POLYGON_EGOLD_ADDRESS, ESLVR:process.env.POLYGON_ESLVR_ADDRESS },
     };
     return map[chain]?.[symbol];
   }

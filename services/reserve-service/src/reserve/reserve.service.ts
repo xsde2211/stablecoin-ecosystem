@@ -232,7 +232,7 @@ export class ReserveService {
 
   private getVaultAddress(chain: string) {
     const map: Record<string,string|undefined> = {
-      ethereum: process.env.SEPOLIA_RESERVE_VAULT_ADDRESS,
+      ethereum: process.env.ETH_RESERVE_VAULT_ADDRESS,
       bsc:      process.env.BSC_RESERVE_VAULT_ADDRESS,
       polygon:  process.env.POLYGONAMOY_RESERVE_VAULT_ADDRESS,
     };

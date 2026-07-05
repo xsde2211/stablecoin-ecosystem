@@ -1,16 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  SafeAreaView, Alert, Share, Platform,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Share,
 } from 'react-native';
-import * as Clipboard from 'expo-clipboard';
-import { Ionicons }   from '@expo/vector-icons';
-import QRCode         from 'react-native-qrcode-svg';
-import { Header }     from '../../components/ui/Header';
-import { Card }       from '../../components/ui/Card';
-import { Skeleton }   from '../../components/ui/Skeleton';
-import { TokenIcon }  from '../../components/ui/TokenIcon';
-import { ChainBadge } from '../../components/ui/ChainBadge';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import * as Clipboard   from 'expo-clipboard';
+import { Ionicons }     from '@expo/vector-icons';
+import QRCode           from 'react-native-qrcode-svg';
+import { Header }       from '../../components/ui/Header';
+import { Card }         from '../../components/ui/Card';
+import { Skeleton }     from '../../components/ui/Skeleton';
+import { TokenIcon }    from '../../components/ui/TokenIcon';
+import { ChainBadge }   from '../../components/ui/ChainBadge';
 import { colors, typography, spacing, radius, shadow } from '../../theme';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchAddresses } from '../../store/slices/walletSlice';
@@ -32,7 +32,7 @@ export default function ReceiveScreen() {
 
   useEffect(() => { dispatch(fetchAddresses()); }, []);
 
-  // walletSlice.addresses can be an array [{chain,address}] or Record<chain,address>
+  // walletSlice addresses: Record<chain,address> | array of {chain,address}
   const addrMap: Record<string, string> = {};
   if (Array.isArray(addresses)) {
     (addresses as any[]).forEach((a: any) => { if (a?.chain && a?.address) addrMap[a.chain] = a.address; });
@@ -58,7 +58,7 @@ export default function ReceiveScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={[]}>
       <Header title="Receive" subtitle="Share your address to receive funds" />
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
 
@@ -78,7 +78,7 @@ export default function ReceiveScreen() {
           ))}
         </View>
 
-        {/* Chain tabs - horizontal scroll */}
+        {/* Chain tabs */}
         <Text style={styles.label}>Network</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chainScroll}>
           {CHAINS.map(c => (
@@ -114,7 +114,7 @@ export default function ReceiveScreen() {
               </View>
               <Text style={styles.noAddrTitle}>No wallet on {CHAIN_LABEL[chain]}</Text>
               <Text style={styles.noAddrDesc}>
-                This chain wallet hasn't been created yet. Pull down to refresh.
+                This chain wallet hasn't been set up yet. Pull down to refresh.
               </Text>
             </View>
           )}
@@ -128,9 +128,14 @@ export default function ReceiveScreen() {
             <View style={styles.addrBtns}>
               <TouchableOpacity
                 style={[styles.addrBtn, copied && styles.addrBtnCopied]}
-                onPress={copyAddress} activeOpacity={0.7}
+                onPress={copyAddress}
+                activeOpacity={0.7}
               >
-                <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={16} color={copied ? colors.success : colors.teal} />
+                <Ionicons
+                  name={copied ? 'checkmark' : 'copy-outline'}
+                  size={16}
+                  color={copied ? colors.success : colors.teal}
+                />
                 <Text style={[styles.addrBtnText, copied && { color: colors.success }]}>
                   {copied ? 'Copied!' : 'Copy'}
                 </Text>
@@ -147,11 +152,12 @@ export default function ReceiveScreen() {
         <View style={styles.warning}>
           <Ionicons name="warning-outline" size={16} color={colors.warning} />
           <Text style={styles.warningText}>
-            Only send <Text style={{ fontWeight: '700', color: colors.text }}>{token}</Text> via{' '}
-            <Text style={{ fontWeight: '700', color: colors.text }}>{CHAIN_LABEL[chain]}</Text> to this address.
-            Wrong asset or wrong network = permanent loss.
+            Only send <Text style={{ fontWeight: '700' as const, color: colors.text }}>{token}</Text> via{' '}
+            <Text style={{ fontWeight: '700' as const, color: colors.text }}>{CHAIN_LABEL[chain]}</Text> to this address.
+            Wrong asset or network = permanent loss.
           </Text>
         </View>
+
         <View style={{ height: 100 }} />
       </ScrollView>
     </SafeAreaView>
@@ -180,22 +186,18 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg, backgroundColor: colors.surface, borderWidth: 1.5, borderColor: colors.border,
   },
   chainChipActive: { borderColor: colors.teal, backgroundColor: colors.tealBg },
-  qrCard:  { marginTop: spacing.xl, alignItems: 'center', padding: spacing.xl },
-  qrWrap:  { padding: spacing.md, backgroundColor: '#FFFFFF', borderRadius: radius.lg, ...shadow.md },
+  qrCard:   { marginTop: spacing.xl, alignItems: 'center', padding: spacing.xl },
+  qrWrap:   { padding: spacing.md, backgroundColor: '#FFFFFF', borderRadius: radius.lg, ...shadow.md },
   qrLabelRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.lg },
   qrLabelText: { ...typography.sm, color: colors.textSecondary, fontWeight: '600' as const },
   noAddrWrap: { alignItems: 'center', paddingVertical: spacing.xxxl },
-  noAddrIcon: {
-    width: 64, height: 64, borderRadius: 32,
-    backgroundColor: colors.surfaceHigh, borderWidth: 1, borderColor: colors.border,
-    alignItems: 'center', justifyContent: 'center', marginBottom: spacing.md,
-  },
+  noAddrIcon: { width: 64, height: 64, borderRadius: 32, backgroundColor: colors.surfaceHigh, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.md },
   noAddrTitle: { ...typography.h4, color: colors.text, marginBottom: spacing.sm },
   noAddrDesc:  { ...typography.sm, color: colors.textSecondary, textAlign: 'center', lineHeight: 20, paddingHorizontal: spacing.md },
-  addrCard:   { marginTop: spacing.lg, padding: spacing.lg },
-  addrLabel:  { ...typography.xs, color: colors.textTertiary, fontWeight: '700' as const, textTransform: 'uppercase' as const, letterSpacing: 0.5, marginBottom: spacing.sm },
-  addrText:   { ...typography.mono, color: colors.text, lineHeight: 22, marginBottom: spacing.md },
-  addrBtns:   { flexDirection: 'row', gap: spacing.sm },
+  addrCard:    { marginTop: spacing.lg, padding: spacing.lg },
+  addrLabel:   { ...typography.xs, color: colors.textTertiary, fontWeight: '700' as const, textTransform: 'uppercase' as const, letterSpacing: 0.5, marginBottom: spacing.sm },
+  addrText:    { ...typography.mono, color: colors.text, lineHeight: 22, marginBottom: spacing.md },
+  addrBtns:    { flexDirection: 'row', gap: spacing.sm },
   addrBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
     paddingVertical: 12, borderRadius: radius.lg,

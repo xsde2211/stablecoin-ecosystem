@@ -1,17 +1,29 @@
 import {
-  Injectable, BadRequestException,
-  NotFoundException, Logger,
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { KmsService }    from './kms.service';
 import { ChainService }  from './chain.service';
 import { SendTokenDto }  from './dto/send-token.dto';
-import * as bip39        from 'bip39';
-import { ethers }        from 'ethers';
-import { TronWeb }       from 'tronweb';
+import {
+  generateMnemonic,
+  validateMnemonic,
+  deriveAllAddresses,
+} from '@ecosystem/crypto';
 
-const CHAINS = ['tron','ethereum','bsc','polygon','solana'] as const;
-type Chain   = typeof CHAINS[number];
+// Converts BigInt fields to string so JSON.stringify doesn't crash.
+// Affects: blockNumber (BigInt), gasUsed (Decimal), amount (Decimal)
+function serializeTx(tx: any) {
+  return {
+    ...tx,
+    blockNumber: tx.blockNumber != null ? tx.blockNumber.toString() : null,
+    gasUsed:     tx.gasUsed     != null ? tx.gasUsed.toString()     : null,
+    amount:      tx.amount      != null ? tx.amount.toString()      : null,
+  };
+}
 
 @Injectable()
 export class WalletService {
@@ -23,7 +35,7 @@ export class WalletService {
     private chain:  ChainService,
   ) {}
 
-  // ─── Create wallet ──────────────────────────────────────────────────────────
+  // ─── Create wallet ───────────────────────────────────────────────────────────
 
   async createWallet(userId: string) {
     const existing = await this.prisma.wallet.findFirst({
@@ -31,19 +43,21 @@ export class WalletService {
     });
     if (existing) throw new BadRequestException('Wallet already exists for this user');
 
-    // Generate BIP39 mnemonic (24 words)
-    const mnemonic  = bip39.generateMnemonic(256);
-    const addresses = this.deriveAllAddresses(mnemonic);
+    const mnemonic  = generateMnemonic();
+    const addresses = deriveAllAddresses(mnemonic);
     const encrypted = await this.kms.encrypt(mnemonic);
 
-    // Create wallet records for all chains in a single transaction
+    const chains = ['tron', 'ethereum', 'bsc', 'polygon', 'solana'] as const;
+
     await this.prisma.$transaction(
-      CHAINS.map(c =>
+      chains.map(c =>
         this.prisma.wallet.create({
           data: {
             userId,
             chain:         c,
-            address:       addresses[c],
+            // Store EVM addresses lowercase — listener Transfer events arrive
+            // checksummed (0xAbCd…) so we need consistent casing for lookups
+            address:       c === 'tron' ? addresses[c] : addresses[c].toLowerCase(),
             encPrivateKey: encrypted,
           },
         })
@@ -51,52 +65,47 @@ export class WalletService {
     );
 
     this.logger.log(`Wallet created for user ${userId}`);
-
-    // Audit log
-    await this.prisma.auditLog.create({
-      data: {
-        userId,
-        action:     'WALLET_CREATE',
-        entityType: 'Wallet',
-        entityId:   userId,
-      },
-    });
-
-    // Mnemonic shown ONCE here — never stored in plain text
     return { mnemonic, addresses };
   }
 
-  // ─── Import wallet ──────────────────────────────────────────────────────────
+  // ─── Import wallet ───────────────────────────────────────────────────────────
 
   async importWallet(userId: string, mnemonic: string) {
-    const clean = mnemonic.trim().toLowerCase().replace(/\s+/g, ' ');
-    if (!bip39.validateMnemonic(clean)) {
-      throw new BadRequestException('Invalid mnemonic phrase — must be 12 or 24 valid BIP39 words');
+    if (!validateMnemonic(mnemonic)) {
+      throw new BadRequestException('Invalid mnemonic phrase');
     }
 
-    const addresses = this.deriveAllAddresses(clean);
-    const encrypted = await this.kms.encrypt(clean);
+    const addresses = deriveAllAddresses(mnemonic);
+    const encrypted = await this.kms.encrypt(mnemonic);
+    const chains    = ['tron', 'ethereum', 'bsc', 'polygon', 'solana'] as const;
 
-    for (const c of CHAINS) {
+    for (const c of chains) {
       await this.prisma.wallet.upsert({
         where:  { userId_chain: { userId, chain: c } },
-        update: { address: addresses[c], encPrivateKey: encrypted },
-        create: { userId, chain: c, address: addresses[c], encPrivateKey: encrypted },
+        update: {
+          address:       c === 'tron' ? addresses[c] : addresses[c].toLowerCase(),
+          encPrivateKey: encrypted,
+        },
+        create: {
+          userId,
+          chain:         c,
+          address:       c === 'tron' ? addresses[c] : addresses[c].toLowerCase(),
+          encPrivateKey: encrypted,
+        },
       });
     }
 
-    this.logger.log(`Wallet imported for user ${userId}`);
     return { addresses };
   }
 
-  // ─── Get all addresses ──────────────────────────────────────────────────────
+  // ─── Get addresses ───────────────────────────────────────────────────────────
 
-  async getAddresses(userId: string): Promise<Record<string, string>> {
+  async getAddresses(userId: string) {
     const wallets = await this.prisma.wallet.findMany({
       where:  { userId },
       select: { chain: true, address: true },
     });
-    if (!wallets.length) throw new NotFoundException('No wallet found. Create or import one first.');
+    if (!wallets.length) throw new NotFoundException('No wallet found');
 
     return wallets.reduce((acc, w) => {
       acc[w.chain] = w.address;
@@ -108,16 +117,15 @@ export class WalletService {
 
   async getAllBalances(userId: string) {
     const wallets = await this.prisma.wallet.findMany({ where: { userId } });
-    if (!wallets.length) throw new NotFoundException('No wallet found.');
+    if (!wallets.length) throw new NotFoundException('No wallet found');
 
-    const tokens  = ['INRX', 'EGOLD', 'ESLVR'] as const;
+    const tokens  = ['INRX', 'EGOLD', 'ESLVR'];
     const results = [];
 
-    // Fetch balances in parallel per chain
-    const promises = wallets.flatMap(wallet =>
-      tokens.map(async symbol => {
+    for (const wallet of wallets) {
+      for (const symbol of tokens) {
         const tokenAddress = this.chain.getTokenAddress(wallet.chain, symbol);
-        if (!tokenAddress) return null;
+        if (!tokenAddress) continue;
 
         const balance = await this.chain.getBalance(
           wallet.chain,
@@ -125,19 +133,8 @@ export class WalletService {
           tokenAddress,
         );
 
-        return {
-          chain:        wallet.chain,
-          address:      wallet.address,
-          symbol,
-          balance,
-          tokenAddress,
-        };
-      })
-    );
-
-    const settled = await Promise.allSettled(promises);
-    for (const r of settled) {
-      if (r.status === 'fulfilled' && r.value) results.push(r.value);
+        results.push({ chain: wallet.chain, address: wallet.address, symbol, balance });
+      }
     }
 
     return results;
@@ -149,29 +146,21 @@ export class WalletService {
     const wallet = await this.prisma.wallet.findUnique({
       where: { userId_chain: { userId, chain: dto.chain } },
     });
-    if (!wallet) throw new NotFoundException(`No wallet for chain: ${dto.chain}`);
+    if (!wallet) throw new NotFoundException('Wallet not found for this chain');
 
     const tokenAddress = this.chain.getTokenAddress(dto.chain, dto.token);
-    if (!tokenAddress) {
-      throw new BadRequestException(`Token ${dto.token} not configured for chain ${dto.chain}`);
-    }
+    if (!tokenAddress) throw new BadRequestException('Token not supported on this chain');
 
     const mnemonic = await this.kms.decrypt(wallet.encPrivateKey);
-
     let txHash: string;
 
     if (dto.chain === 'tron') {
-      txHash = await this.chain.sendTRONToken(
-        mnemonic, dto.toAddress, tokenAddress, dto.amount,
-      );
+      txHash = await this.chain.sendTRONToken(mnemonic, dto.toAddress, tokenAddress, dto.amount);
     } else {
-      txHash = await this.chain.sendEVMToken(
-        dto.chain, mnemonic, dto.toAddress, tokenAddress, dto.amount,
-      );
+      txHash = await this.chain.sendEVMToken(dto.chain, mnemonic, dto.toAddress, tokenAddress, dto.amount);
     }
 
-    // Record as PENDING — listener service will confirm
-    const tx = await this.prisma.transaction.create({
+    await this.prisma.transaction.create({
       data: {
         walletId:    wallet.id,
         txHash,
@@ -180,28 +169,19 @@ export class WalletService {
         amount:      dto.amount,
         tokenSymbol: dto.token,
         fromAddress: wallet.address,
-        toAddress:   dto.toAddress,
+        toAddress:   dto.chain === 'tron' ? dto.toAddress : dto.toAddress.toLowerCase(),
         status:      'PENDING',
       },
     });
 
-    this.logger.log(`Token sent: ${txHash} on ${dto.chain} by user ${userId}`);
-
-    // Audit log
-    await this.prisma.auditLog.create({
-      data: {
-        userId,
-        action:     'TOKEN_SEND',
-        entityType: 'Transaction',
-        entityId:   tx.id,
-        payload:    { chain: dto.chain, token: dto.token, amount: dto.amount, to: dto.toAddress },
-      },
-    });
-
-    return { txHash, status: 'PENDING', transactionId: tx.id };
+    this.logger.log(`Token sent: ${txHash} on ${dto.chain}`);
+    return { txHash, status: 'PENDING' };
   }
 
-  // ─── Transaction history ─────────────────────────────────────────────────────
+  // ─── Transaction history ──────────────────────────────────────────────────────
+  // BigInt fix: blockNumber is stored as BigInt in DB.
+  // JSON.stringify (used by Express response) cannot serialize BigInt natively.
+  // serializeTx() converts all BigInt/Decimal fields to strings before return.
 
   async getTransactions(userId: string, page = 1, limit = 20) {
     const wallets = await this.prisma.wallet.findMany({
@@ -210,13 +190,11 @@ export class WalletService {
     });
     const walletIds = wallets.map(w => w.id);
 
-    const skip = (page - 1) * limit;
-
     const [data, total] = await Promise.all([
       this.prisma.transaction.findMany({
         where:   { walletId: { in: walletIds } },
         orderBy: { createdAt: 'desc' },
-        skip,
+        skip:    (page - 1) * limit,
         take:    limit,
       }),
       this.prisma.transaction.count({
@@ -224,51 +202,23 @@ export class WalletService {
       }),
     ]);
 
-    return {
-      data,
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
-    };
+    return { data: data.map(serializeTx), total, page, limit };
   }
 
   // ─── Get single transaction ──────────────────────────────────────────────────
 
   async getTransaction(userId: string, txId: string) {
-    const wallets   = await this.prisma.wallet.findMany({ where:{ userId }, select:{ id:true } });
+    const wallets   = await this.prisma.wallet.findMany({
+      where:  { userId },
+      select: { id: true },
+    });
     const walletIds = wallets.map(w => w.id);
 
     const tx = await this.prisma.transaction.findFirst({
       where: { id: txId, walletId: { in: walletIds } },
     });
     if (!tx) throw new NotFoundException('Transaction not found');
-    return tx;
-  }
 
-  // ─── Address derivation ──────────────────────────────────────────────────────
-
-  private deriveAllAddresses(mnemonic: string): Record<Chain, string> {
-    // EVM chains all use the same address (BIP44 m/44'/60'/0'/0/0)
-    const evmWallet   = ethers.HDNodeWallet.fromPhrase(mnemonic);
-    const evmAddress  = evmWallet.address;
-
-    // TRON: same derivation path but address format differs
-    const tronWeb     = new TronWeb({ fullHost: process.env.TRON_RPC! });
-    const tronAddress = tronWeb.address.fromPrivateKey(evmWallet.privateKey.slice(2)) as string;
-
-    // Solana: BIP44 m/44'/501'/0'/0' — derive from seed
-    const seed        = bip39.mnemonicToSeedSync(mnemonic);
-    // Simple derivation — in production use @solana/web3.js Keypair.fromSeed
-    const solanaKey   = seed.slice(0, 32);
-    const solanaAddr  = Buffer.from(solanaKey).toString('hex'); // placeholder — real impl uses ed25519
-
-    return {
-      ethereum: evmAddress,
-      bsc:      evmAddress,
-      polygon:  evmAddress,
-      tron:     tronAddress,
-      solana:   solanaAddr,
-    };
+    return serializeTx(tx);
   }
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   SafeAreaView, Alert, Switch, Linking, TextInput, Platform,
@@ -8,7 +8,7 @@ import * as Notifications       from 'expo-notifications';
 import AsyncStorage             from '@react-native-async-storage/async-storage';
 import { Ionicons }             from '@expo/vector-icons';
 import { useDispatch }          from 'react-redux';
-import { useNavigation }        from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { Header }               from '../../components/ui/Header';
 import { Card }                 from '../../components/ui/Card';
 import { Button }               from '../../components/ui/Button';
@@ -21,6 +21,18 @@ const K_BIO   = '@pref_biometric';
 const K_PUSH  = '@pref_push';
 const K_EMAIL = '@pref_email';
 
+// Same status set as KycScreen — kept condensed for a single settings row.
+// NOTE: 'Kyc' below must match whatever route name your navigator registers
+// KycScreen under — change it if your app uses a different route name.
+const KYC_ROUTE = 'Kyc';
+
+const KYC_CFG: Record<string, { icon: any; color: string; label: string; action: string }> = {
+  NOT_SUBMITTED: { icon: 'shield-outline',        color: colors.textSecondary, label: 'Not submitted', action: 'Start Verification' },
+  SUBMITTED:     { icon: 'time-outline',          color: colors.warning,       label: 'Under review',  action: 'Refresh Status' },
+  APPROVED:      { icon: 'shield-checkmark',       color: colors.success,       label: 'Verified',      action: 'View' },
+  REJECTED:      { icon: 'close-circle',           color: colors.error,         label: 'Rejected',      action: 'Resubmit KYC' },
+};
+
 export default function SettingsScreen() {
   const dispatch   = useDispatch<AppDispatch>();
   const navigation = useNavigation<any>();
@@ -29,6 +41,32 @@ export default function SettingsScreen() {
   const [bioEnabled,   setBioEnabled]   = useState(false);
   const [pushEnabled,  setPushEnabled]  = useState(false);
   const [emailEnabled, setEmailEnabled] = useState(false);
+
+  // ── KYC status ──────────────────────────────────────────────────────────
+  const [kycStatus,  setKycStatus]  = useState('NOT_SUBMITTED');
+  const [kycLoading, setKycLoading] = useState(true);
+
+  const loadKyc = useCallback(async () => {
+    try {
+      const res = await api.getKycStatus();
+      setKycStatus(res?.kycStatus ?? 'NOT_SUBMITTED');
+    } catch {
+      // leave last-known status on failure rather than resetting
+    } finally {
+      setKycLoading(false);
+    }
+  }, []);
+
+  // Refresh every time this screen regains focus — e.g. returning from the
+  // KYC form, or coming back after admin approval — so the status shown here
+  // always reflects the latest backend state without a manual pull-to-refresh.
+  useFocusEffect(
+    useCallback(() => {
+      loadKyc();
+    }, [loadKyc])
+  );
+
+  const kcfg = KYC_CFG[kycStatus] ?? KYC_CFG.NOT_SUBMITTED;
 
   const [showPwd,    setShowPwd]    = useState(false);
   const [curPwd,     setCurPwd]     = useState('');
@@ -125,6 +163,32 @@ export default function SettingsScreen() {
     <SafeAreaView style={styles.container}>
       <Header title="Settings" />
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+
+        {/* ── Identity Verification (KYC) ──────────────────────────────── */}
+        <Text style={styles.sec}>Identity Verification</Text>
+        <Card padding={0}>
+          <TouchableOpacity
+            style={styles.row}
+            onPress={() => navigation.navigate(KYC_ROUTE)}
+            activeOpacity={0.7}
+            disabled={kycLoading}
+          >
+            <View style={[styles.rowIcon, { backgroundColor: kcfg.color + '20' }]}>
+              <Ionicons name={kcfg.icon} size={18} color={kcfg.color} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>KYC Status</Text>
+              <Text style={[styles.rowSub, { color: kcfg.color }]}>
+                {kycLoading ? 'Checking…' : kcfg.label}
+              </Text>
+            </View>
+            {!kycLoading && (
+              <View style={styles.manageBtn}>
+                <Text style={styles.manageBtnText}>{kcfg.action}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        </Card>
 
         {/* ── Security ──────────────────────────────────────────────── */}
         <Text style={styles.sec}>Security</Text>

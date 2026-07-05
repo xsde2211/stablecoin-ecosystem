@@ -11,7 +11,7 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist:true, transform:true }));
   const config = new DocumentBuilder().setTitle('Admin Service').setDescription('User management, audit logs, system overview').setVersion('1.0').addBearerAuth().build();
   SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, config));
-  const port = process.env.PORT ?? 3015;
+  const port = 3015;
   await app.listen(port);
   logger.log(`Admin service running on port ${port}`);
 }

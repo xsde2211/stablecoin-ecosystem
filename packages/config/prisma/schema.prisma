@@ -71,7 +71,7 @@ model Wallet {
 model Transaction {
   id          String    @id @default(uuid())
   walletId    String
-  txHash      String?   @unique
+  txHash      String?   
   chain       String
   type        TxType
   amount      Decimal   @db.Decimal(36, 18)
@@ -89,6 +89,7 @@ model Transaction {
   amlFlags AmlFlag[]
   // Partition by month in production via pg_partman
 
+  @@unique([walletId, txHash])
   @@index([walletId])
   @@index([txHash])
   @@index([chain, status])
@@ -171,7 +172,7 @@ model KycApplication {
   id             String    @id @default(uuid())
   userId         String
   provider       String // manual | hyperverge | digilocker | aadhaar_xml
-  status         KycStatus
+  status         KycStatus  @default(NOT_SUBMITTED)
   documentType   String?
   documentRef    String? // provider reference ID
   fullName       String?

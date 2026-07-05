@@ -135,11 +135,13 @@ export default function AppNavigator() {
 
   return (
     <NavigationContainer>
-      <Stack.Navigator screenOptions={{ headerShown: false }} initialRouteName={initialRoute}>
-        <Stack.Screen name="Auth"             component={AuthStack} />
-        <Stack.Screen name="WalletSetupModal" component={WalletSetupScreen} />
-        <Stack.Screen name="Main"             component={MainTabs} />
-      </Stack.Navigator>
+      {!isAuthenticated ? (
+          <AuthStack />
+      ) : !walletReady ? (
+          <WalletSetupScreen />
+      ) : (
+          <MainTabs />
+      )}
     </NavigationContainer>
   );
 }

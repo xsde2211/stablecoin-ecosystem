@@ -1,8 +1,10 @@
 import {
   Injectable, BadRequestException,
-  NotFoundException, Logger,
+  NotFoundException, Logger, OnModuleInit,
 } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { ethers }        from 'ethers';
+import axios              from 'axios';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService }  from '../redis/redis.service';
 import { MintDto }       from './dto/mint.dto';
@@ -27,11 +29,12 @@ const TOKEN_ABI = [
   'function decimals() view returns (uint8)',
 ];
 
-// OracleManager ABI — for reading gold/silver prices
+// OracleManager ABI — for reading gold/silver prices, and now writing live updates
 const ORACLE_ABI = [
   'function getPriceSafe(bytes32 tokenId) view returns (uint256 price, uint256 count)',
   'function getOracles(bytes32 tokenId) view returns (address[] addresses, string[] names, uint256[] prices, uint256[] updatedAts, bool[] actives, bool[] stales)',
   'function stalePriceThreshold() view returns (uint256)',
+  'function updatePrice(bytes32 tokenId, uint256 price)',
 ];
 
 // ReserveVault ABI — for proof of reserve
@@ -49,13 +52,21 @@ const TOKEN_IDS: Record<string,string> = {
 const CHAINS = ['ethereum','bsc','polygon'] as const;
 
 @Injectable()
-export class StablecoinService {
+export class StablecoinService implements OnModuleInit {
   private readonly logger = new Logger(StablecoinService.name);
 
   constructor(
     private prisma: PrismaService,
     private redis:  RedisService,
   ) {}
+
+  async onModuleInit() {
+    // Push a live price immediately at boot so the app isn't stuck showing
+    // the stale deploy-time price for up to 5 minutes after a restart.
+    this.updateAllLiveOraclePrices().catch(err =>
+      this.logger.error(`Initial live price push failed: ${err.message}`)
+    );
+  }
 
   // ─── Token info for single chain ──────────────────────────────────────────
 
@@ -111,6 +122,130 @@ export class StablecoinService {
     return results
       .filter(r => r.status === 'fulfilled')
       .map(r => (r as PromiseFulfilledResult<any>).value);
+  }
+
+  // ─── Live price feed — real gold/silver market prices, pushed on-chain ─────
+  //
+  // Runs every 5 minutes (plus once at startup via onModuleInit). Fetches:
+  //   1. Live spot price of gold/silver in USD per troy ounce (gold-api.com —
+  //      free, no API key required)
+  //   2. Live USD→INR exchange rate (open.er-api.com — free, no API key)
+  // then converts to INR per gram and submits it on-chain — from TWO
+  // independent oracle wallets (ORACLE_1_PRIVATE_KEY, ORACLE_2_PRIVATE_KEY) —
+  // via OracleManager.updatePrice(). OracleManager's own _aggregatePrice()
+  // then takes the median across both submissions, so a single compromised
+  // or misbehaving oracle wallet can't unilaterally set the price; the other
+  // oracle's submission still anchors it.
+  //
+  // Setup required (one-time, not code): BOTH oracle addresses must already
+  // be registered via OracleManager.registerOracle(tokenId, addr, name) by an
+  // account holding MANAGER_ROLE, for every chain and for both EGOLD and
+  // ESLVR. Consider also calling setMinOracles(2) so a price is only
+  // considered valid once both have reported — otherwise a single oracle's
+  // price still counts on its own if the other hasn't submitted yet.
+
+  private static readonly GRAMS_PER_TROY_OUNCE = 31.1034768;
+  private static readonly METAL_SYMBOL: Record<string,string> = { EGOLD: 'XAU', ESLVR: 'XAG' };
+
+  // Both oracle signer keys — each submits independently so OracleManager has
+  // more than one source to median across, per its own on-chain aggregation.
+  private get oraclePrivateKeys(): string[] {
+    const keys = [process.env.ORACLE_1_PRIVATE_KEY, process.env.ORACLE_2_PRIVATE_KEY]
+      .filter((k): k is string => !!k);
+    if (keys.length === 0) {
+      throw new Error('No oracle keys configured — set ORACLE_1_PRIVATE_KEY / ORACLE_2_PRIVATE_KEY');
+    }
+    return keys;
+  }
+
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async pushLiveOraclePrices() {
+    try {
+      await this.updateAllLiveOraclePrices();
+    } catch (err: any) {
+      this.logger.error(`Live oracle price feed failed: ${err.message}`);
+    }
+  }
+
+  async updateAllLiveOraclePrices() {
+    const usdToInr = await this.fetchUsdToInrRate();
+
+    for (const token of ['EGOLD', 'ESLVR']) {
+      const usdPerOz = await this.fetchSpotPriceUsdPerOz(StablecoinService.METAL_SYMBOL[token]);
+      const inrPerGram = (usdPerOz * usdToInr) / StablecoinService.GRAMS_PER_TROY_OUNCE;
+
+      for (const chain of CHAINS) {
+        try {
+          await this.pushOraclePriceFromAllOracles(token, chain, inrPerGram);
+        } catch (err: any) {
+          // One chain misconfigured/unreachable shouldn't block the others
+          this.logger.warn(`Oracle push failed [${token}/${chain}]: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  private async fetchSpotPriceUsdPerOz(metalSymbol: string): Promise<number> {
+    const cacheKey = `livePrice:${metalSymbol}`;
+    const cached = await this.redis.get(cacheKey).catch(() => null);
+    if (cached) return parseFloat(cached);
+
+    const res = await axios.get(`https://api.gold-api.com/price/${metalSymbol}`, { timeout: 10000 });
+    const price = Number(res.data?.price);
+    if (!price || price <= 0) throw new Error(`Invalid spot price response for ${metalSymbol}`);
+
+    // Cache for 4 minutes — cushions against the 5-min cron overlapping a rate limit
+    await this.redis.set(cacheKey, price.toString(), 240).catch(() => {});
+    return price;
+  }
+
+  private async fetchUsdToInrRate(): Promise<number> {
+    const cacheKey = 'livePrice:usdInr';
+    const cached = await this.redis.get(cacheKey).catch(() => null);
+    if (cached) return parseFloat(cached);
+
+    const res  = await axios.get('https://open.er-api.com/v6/latest/USD', { timeout: 10000 });
+    const rate = Number(res.data?.rates?.INR);
+    if (!rate || rate <= 0) throw new Error('Invalid USD/INR rate response');
+
+    await this.redis.set(cacheKey, rate.toString(), 240).catch(() => {});
+    return rate;
+  }
+
+  // Submits the same live price independently from each configured oracle
+  // wallet. Each submission is its own on-chain tx, signed by a different
+  // key — OracleManager treats them as separate oracles and medians across
+  // whichever are currently active and non-stale.
+  private async pushOraclePriceFromAllOracles(token: string, chain: string, inrPerGram: number) {
+    const oracleAddr = this.getOracleAddress(chain);
+    if (!oracleAddr) return; // chain not configured for oracle — skip quietly
+
+    const provider     = this.getProvider(chain);
+    const tokenId      = TOKEN_IDS[token];
+    const priceScaled  = ethers.parseUnits(inrPerGram.toFixed(6), 6);
+
+    const results = await Promise.allSettled(
+      this.oraclePrivateKeys.map(async (key, i) => {
+        const signer  = new ethers.Wallet(key, provider);
+        const oracle  = new ethers.Contract(oracleAddr, ORACLE_ABI, signer);
+        const tx      = await oracle.updatePrice(tokenId, priceScaled);
+        const receipt = await tx.wait();
+        this.logger.log(
+          `[${chain}] Oracle ${i + 1} (${signer.address}) pushed ${token} = ₹${inrPerGram.toFixed(2)}/gram (tx ${receipt.hash})`
+        );
+        return receipt.hash;
+      })
+    );
+
+    const failed = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
+    if (failed.length > 0) {
+      for (const f of failed) {
+        this.logger.warn(`[${chain}] An oracle submission for ${token} failed: ${f.reason?.message ?? f.reason}`);
+      }
+    }
+    if (failed.length === results.length) {
+      throw new Error(`All oracle submissions failed for ${token} on ${chain}`);
+    }
   }
 
   // ─── Oracle prices (EGold and ESilver) ─────────────────────────────────────
@@ -198,10 +333,11 @@ export class StablecoinService {
     const address  = this.getTokenAddress(dto.token, dto.chain);
     const provider = this.getProvider(dto.chain);
 
-    const minterKey = process.env.SIGNER_1_PRIVATE_KEY;
+    const minterKey = process.env.MINTER_PRIVATE_KEY;
     if (!minterKey) throw new BadRequestException('SIGNER_1_PRIVATE_KEY not set — cannot mint directly');
 
     const signer   = new ethers.Wallet(minterKey, provider);
+    console.log("Signer Address:", signer.address);
     const contract = new ethers.Contract(address, TOKEN_ABI, signer);
     const paused   = await contract.paused();
     if (paused) throw new BadRequestException(`${dto.token} is paused on ${dto.chain}`);
@@ -241,14 +377,40 @@ export class StablecoinService {
     txHash: string, chain: string, type: string, amount: string,
     token: string, from: string, to: string, userId: string,
   ) {
+    // Look up the user's actual wallet for this chain
+    // If not found, skip transaction recording (mint still succeeded on-chain)
+    const wallet = await this.prisma.wallet.findFirst({
+      where: { userId, chain },
+    });
+
     await Promise.all([
-      this.prisma.transaction.create({
-        data: { walletId:'system', txHash, chain, type: type as TxType, amount, tokenSymbol: token,
-                fromAddress:from, toAddress:to, status:'CONFIRMED', confirmedAt:new Date() },
-      }),
+      // Only record Transaction if we found a real wallet
+      wallet
+        ? this.prisma.transaction.create({
+            data: {
+              walletId:    wallet.id,
+              txHash,
+              chain,
+              type:        type as TxType,
+              amount,
+              tokenSymbol: token,
+              fromAddress: from,
+              toAddress:   to,
+              status:      'CONFIRMED',
+              confirmedAt: new Date(),
+            },
+          })
+        : Promise.resolve(), // no wallet found — skip DB record, mint still worked
+
+      // Always record audit log
       this.prisma.auditLog.create({
-        data: { userId, action:`${type}_TOKENS`, entityType:'Token', entityId:txHash,
-                payload:{ chain, token, amount, from, to, txHash } },
+        data: {
+          userId,
+          action:     `${type}_TOKENS`,
+          entityType: 'Token',
+          entityId:   txHash,
+          payload:    { chain, token, amount, from, to, txHash },
+        },
       }),
     ]);
   }
@@ -265,9 +427,9 @@ export class StablecoinService {
 
   private getTokenAddress(token: string, chain: string): string {
     const map: Record<string,Record<string,string>> = {
-      INRX:  { ethereum:process.env.SEPOLIA_INRX_ADDRESS!,  bsc:process.env.BSC_INRX_ADDRESS!,  polygon:process.env.POLYGONAMOY_INRX_ADDRESS! },
-      EGOLD: { ethereum:process.env.SEPOLIA_EGOLD_ADDRESS!, bsc:process.env.BSC_EGOLD_ADDRESS!, polygon:process.env.POLYGONAMOY_EGOLD_ADDRESS! },
-      ESLVR: { ethereum:process.env.SEPOLIA_ESLVR_ADDRESS!, bsc:process.env.BSC_ESLVR_ADDRESS!, polygon:process.env.POLYGONAMOY_ESLVR_ADDRESS! },
+      INRX:  { ethereum:process.env.ETH_INRX_ADDRESS!,  bsc:process.env.BSC_INRX_ADDRESS!,  polygon:process.env.POLYGON_INRX_ADDRESS! },
+      EGOLD: { ethereum:process.env.ETH_EGOLD_ADDRESS!, bsc:process.env.BSC_EGOLD_ADDRESS!, polygon:process.env.POLYGON_EGOLD_ADDRESS! },
+      ESLVR: { ethereum:process.env.ETH_ESLVR_ADDRESS!, bsc:process.env.BSC_ESLVR_ADDRESS!, polygon:process.env.POLYGON_ESLVR_ADDRESS! },
     };
     const addr = map[token]?.[chain];
     if (!addr) throw new BadRequestException(`No contract for ${token} on ${chain}. Check .env`);
@@ -276,18 +438,18 @@ export class StablecoinService {
 
   private getOracleAddress(chain: string): string | undefined {
     const map: Record<string,string|undefined> = {
-      ethereum: process.env.SEPOLIA_ORACLE_MANAGER_ADDRESS,
+      ethereum: process.env.ETH_ORACLE_MANAGER_ADDRESS,
       bsc:      process.env.BSC_ORACLE_MANAGER_ADDRESS,
-      polygon:  process.env.POLYGONAMOY_ORACLE_MANAGER_ADDRESS,
+      polygon:  process.env.POLYGON_ORACLE_MANAGER_ADDRESS,
     };
     return map[chain];
   }
 
   private getReserveVaultAddress(chain: string): string | undefined {
     const map: Record<string,string|undefined> = {
-      ethereum: process.env.SEPOLIA_RESERVE_VAULT_ADDRESS,
+      ethereum: process.env.ETH_RESERVE_VAULT_ADDRESS,
       bsc:      process.env.BSC_RESERVE_VAULT_ADDRESS,
-      polygon:  process.env.POLYGONAMOY_RESERVE_VAULT_ADDRESS,
+      polygon:  process.env.POLYGON_RESERVE_VAULT_ADDRESS,
     };
     return map[chain];
   }

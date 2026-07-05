@@ -320,7 +320,7 @@ export class TreasuryService {
 
   private getTimelockAddress(chain: string): string {
     const map: Record<string,string> = {
-      ethereum: process.env.SEPOLIA_TREASURY_TIMELOCK_ADDRESS!,
+      ethereum: process.env.ETH_TREASURY_TIMELOCK_ADDRESS!,
       bsc:      process.env.BSC_TREASURY_TIMELOCK_ADDRESS!,
       polygon:  process.env.POLYGONAMOY_TREASURY_TIMELOCK_ADDRESS!,
     };

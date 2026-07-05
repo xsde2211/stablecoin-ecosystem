@@ -1,10 +1,10 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  RefreshControl, StatusBar, Platform,
+  RefreshControl, StatusBar,
 } from 'react-native';
 import { LinearGradient }                from 'expo-linear-gradient';
-import { SafeAreaView }                  from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useDispatch, useSelector }      from 'react-redux';
 import { Ionicons }                      from '@expo/vector-icons';
@@ -16,10 +16,10 @@ import { colors, typography, spacing, radius, shadow } from '../../theme';
 import { fetchBalances, fetchTransactions } from '../../store/slices/walletSlice';
 import type { AppDispatch, RootState }      from '../../store';
 
-const TOKEN_META: Record<string, { name: string; color: string; glowColor: string }> = {
-  INRX:  { name: 'e-Rupee',  color: colors.teal,   glowColor: 'rgba(0,212,170,0.15)' },
-  EGOLD: { name: 'e-Gold',   color: colors.gold,   glowColor: 'rgba(245,200,66,0.15)' },
-  ESLVR: { name: 'e-Silver', color: colors.silver, glowColor: 'rgba(192,192,216,0.15)' },
+const TOKEN_META: Record<string, { name: string; color: string }> = {
+  INRX:  { name: 'e-Rupee',  color: colors.teal   },
+  EGOLD: { name: 'e-Gold',   color: colors.gold   },
+  ESLVR: { name: 'e-Silver', color: colors.silver },
 };
 
 function timeOfDay() {
@@ -31,7 +31,7 @@ function fmt(n: number) {
   return n.toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
 }
 function shortAddr(s: string) {
-  if (!s || s.length < 12) return s;
+  if (!s || s.length < 12) return s ?? '';
   return `${s.slice(0, 6)}…${s.slice(-4)}`;
 }
 function timeAgo(d: string) {
@@ -47,20 +47,28 @@ function timeAgo(d: string) {
 export default function DashboardScreen() {
   const navigation = useNavigation<any>();
   const dispatch   = useDispatch<AppDispatch>();
+  const insets     = useSafeAreaInsets();
   const { balances, transactions, loading } = useSelector((s: RootState) => s.wallet);
   const { user }   = useSelector((s: RootState) => s.auth);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Derive display name from user data — never shows raw email string
+  // Derive readable display name
   const displayName = (() => {
     if (!user) return 'Welcome';
     const u = user as any;
-    if (u.fullName) return u.fullName;
-    if (u.name)     return u.name;
+    // Prefer server-provided name fields
+    if (u.fullName) return u.fullName.split(' ')[0]; // "Rahul Sharma" → "Rahul"
+    if (u.name)     return u.name.split(' ')[0];
+    // Derive from email: sourabhgupta1221@gmail.com → "Sourabh"
     const local = (u.email ?? '').split('@')[0] ?? '';
-    // Strip trailing digits: sourabhgupta1221 → Sourabh Gupta style
-    const clean = local.replace(/[0-9]/g, '').replace(/([a-z])([A-Z])/g, '$1 $2');
-    return clean.charAt(0).toUpperCase() + clean.slice(1);
+    // Strip numbers and punctuation
+    const letters = local.replace(/[^a-zA-Z]/g, '');
+    if (!letters) return 'Hi';
+    // If camelCase (sourabhGupta), take first word; else take first 10 chars
+    const camelSplit = letters.replace(/([a-z])([A-Z])/g, '$1 $2');
+    const firstName  = camelSplit.split(' ')[0];
+    // Capitalize only first letter, rest lowercase
+    return firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
   })();
 
   const initial = displayName.charAt(0).toUpperCase();
@@ -74,7 +82,10 @@ export default function DashboardScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([dispatch(fetchBalances()), dispatch(fetchTransactions({ page: 1, limit: 5 }))]);
+    await Promise.all([
+      dispatch(fetchBalances()),
+      dispatch(fetchTransactions({ page: 1, limit: 5 })),
+    ]);
     setRefreshing(false);
   };
 
@@ -95,70 +106,107 @@ export default function DashboardScreen() {
   const isLoading = loading && aggregated.every(t => t.total === 0);
 
   return (
+    // Dashboard owns its top inset directly (no Header component).
+    // Use edges={['top']} so the status bar area is correctly padded.
+    // The topBar uses insets.top for fine control.
     <SafeAreaView style={styles.safe} edges={['top']}>
       <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
       <ScrollView
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.teal} colors={[colors.teal]} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={colors.teal}
+            colors={[colors.teal]}
+          />
+        }
         contentContainerStyle={{ paddingBottom: 100 }}
       >
-        {/* Top bar */}
+        {/* Top bar — no extra paddingTop needed because SafeAreaView edges={['top']} handles it */}
         <View style={styles.topBar}>
-          <View>
+          <View style={{ flex: 1, marginRight: spacing.sm }}>
             <Text style={styles.greeting}>Good {timeOfDay()}</Text>
             <Text style={styles.userName} numberOfLines={1}>{displayName}</Text>
           </View>
           <View style={styles.topRight}>
-            <TouchableOpacity style={styles.topBtn} onPress={() => navigation.navigate('Notifications')} hitSlop={{ top:8,bottom:8,left:8,right:8 }} activeOpacity={0.7}>
+            <TouchableOpacity
+              style={styles.topBtn}
+              onPress={() => navigation.navigate('Notifications')}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              activeOpacity={0.7}
+            >
               <Ionicons name="notifications-outline" size={20} color={colors.text} />
             </TouchableOpacity>
-            <TouchableOpacity style={styles.avatarBtn} onPress={() => navigation.navigate('ProfileTab')} hitSlop={{ top:8,bottom:8,left:8,right:8 }} activeOpacity={0.7}>
+            <TouchableOpacity
+              style={styles.avatarBtn}
+              onPress={() => navigation.navigate('ProfileTab')}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              activeOpacity={0.7}
+            >
               <Text style={styles.avatarText}>{initial}</Text>
             </TouchableOpacity>
           </View>
         </View>
 
         {/* Hero balance card */}
-        <LinearGradient colors={['#1A2235', '#0D1520']} start={{x:0,y:0}} end={{x:1,y:1}} style={styles.heroCard}>
-          <View style={styles.heroLabelRow}>
-            <Text style={styles.heroLabel}>Total Portfolio Value</Text>
-            <TouchableOpacity onPress={load} hitSlop={{top:8,bottom:8,left:8,right:8}}>
-              <Ionicons name="refresh-outline" size={16} color={colors.textTertiary} />
-            </TouchableOpacity>
-          </View>
-          {isLoading ? (
-            <Skeleton width={180} height={44} style={{ marginVertical: 8 }} />
-          ) : (
-            <Text style={styles.heroValue}>₹{fmt(portfolioINR)}</Text>
-          )}
-          <View style={styles.quickRow}>
-            {[
-              { icon: 'arrow-up-outline',       label: 'Send',    screen: 'Send' },
-              { icon: 'arrow-down-outline',      label: 'Receive', screen: 'Receive' },
-              { icon: 'swap-horizontal-outline', label: 'Bridge',  screen: 'Bridge' },
-              { icon: 'qr-code-outline',         label: 'Pay',     screen: 'PayQR' },
-            ].map(a => (
-              <TouchableOpacity key={a.label} style={styles.quickBtn} onPress={() => navigation.navigate(a.screen as any)} activeOpacity={0.7}>
-                <View style={styles.quickIcon}>
-                  <Ionicons name={a.icon as any} size={20} color={colors.teal} />
-                </View>
-                <Text style={styles.quickLabel}>{a.label}</Text>
+        <View style={styles.heroWrap}>
+          <LinearGradient
+            colors={['#1A2235', '#0D1520']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.heroCard}
+          >
+            <View style={styles.heroLabelRow}>
+              <Text style={styles.heroLabel}>Total Portfolio Value</Text>
+              <TouchableOpacity onPress={load} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Ionicons name="refresh-outline" size={16} color={colors.textTertiary} />
               </TouchableOpacity>
-            ))}
-          </View>
-        </LinearGradient>
+            </View>
+            {isLoading ? (
+              <Skeleton width={180} height={44} style={{ marginVertical: 8 }} />
+            ) : (
+              <Text style={styles.heroValue}>₹{fmt(portfolioINR)}</Text>
+            )}
+            <View style={styles.quickRow}>
+              {[
+                { icon: 'arrow-up-outline',       label: 'Send',    screen: 'Send'      },
+                { icon: 'arrow-down-outline',      label: 'Receive', screen: 'Receive'   },
+                { icon: 'swap-horizontal-outline', label: 'Bridge',  screen: 'BridgeTab' },
+                { icon: 'qr-code-outline',         label: 'Pay',     screen: 'PayQR'     },
+              ].map(a => (
+                <TouchableOpacity
+                  key={a.label}
+                  style={styles.quickBtn}
+                  onPress={() => navigation.navigate(a.screen as any)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.quickIcon}>
+                    <Ionicons name={a.icon as any} size={20} color={colors.teal} />
+                  </View>
+                  <Text style={styles.quickLabel}>{a.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </LinearGradient>
+        </View>
 
-        {/* Assets section */}
+        {/* Assets */}
         <View style={styles.sectionRow}>
           <Text style={styles.sectionTitle}>Assets</Text>
-          <TouchableOpacity onPress={() => navigation.navigate('TransactionTab')} hitSlop={{top:8,bottom:8,left:8,right:8}}>
+          <TouchableOpacity
+            onPress={() => navigation.navigate('TransactionTab')}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
             <Text style={styles.seeAll}>View all</Text>
           </TouchableOpacity>
         </View>
 
         <View style={styles.assetList}>
           {isLoading ? (
-            [1, 2, 3].map(i => <Skeleton key={i} width="100%" height={72} style={{ marginBottom: spacing.sm }} />)
+            [1, 2, 3].map(i => (
+              <Skeleton key={i} width="100%" height={72} style={{ marginBottom: spacing.sm }} />
+            ))
           ) : (
             aggregated.map(t => (
               <TouchableOpacity
@@ -175,7 +223,7 @@ export default function DashboardScreen() {
                       <ChainBadge key={c.chain} chain={c.chain} size="xs" />
                     ))}
                     {t.chains.length === 0 && (
-                      <Text style={styles.noBalance}>No balance</Text>
+                      <Text style={styles.noBalance}>No balance yet</Text>
                     )}
                   </View>
                 </View>
@@ -191,14 +239,19 @@ export default function DashboardScreen() {
         {/* Recent activity */}
         <View style={styles.sectionRow}>
           <Text style={styles.sectionTitle}>Recent Activity</Text>
-          <TouchableOpacity onPress={() => navigation.navigate('TransactionTab')} hitSlop={{top:8,bottom:8,left:8,right:8}}>
+          <TouchableOpacity
+            onPress={() => navigation.navigate('TransactionTab')}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
             <Text style={styles.seeAll}>See all</Text>
           </TouchableOpacity>
         </View>
 
         <View style={styles.txList}>
           {isLoading ? (
-            [1, 2, 3].map(i => <Skeleton key={i} width="100%" height={62} style={{ marginBottom: spacing.xs }} />)
+            [1, 2, 3].map(i => (
+              <Skeleton key={i} width="100%" height={60} style={{ marginBottom: spacing.xs }} />
+            ))
           ) : recentTxs.length === 0 ? (
             <View style={styles.emptyBox}>
               <Ionicons name="receipt-outline" size={28} color={colors.textTertiary} />
@@ -211,7 +264,7 @@ export default function DashboardScreen() {
               const isBridge = (tx.type ?? '').startsWith('BRIDGE');
               const iconName = isSend ? 'arrow-up' : isBridge ? 'swap-horizontal' : 'arrow-down';
               const iconBg   = isSend ? colors.errorBg : isBridge ? colors.tealBg : colors.successBg;
-              const iconCol  = isSend ? colors.error : isBridge ? colors.teal : colors.success;
+              const iconCol  = isSend ? colors.error   : isBridge ? colors.teal   : colors.success;
               const amtColor = isSend ? colors.error : colors.success;
               const sign     = isSend ? '-' : '+';
               return (
@@ -238,7 +291,11 @@ export default function DashboardScreen() {
                     </Text>
                     <Badge
                       label={tx.status}
-                      variant={tx.status === 'CONFIRMED' ? 'success' : tx.status === 'PENDING' ? 'warning' : 'error'}
+                      variant={
+                        tx.status === 'CONFIRMED' ? 'success'
+                        : tx.status === 'PENDING' ? 'warning'
+                        : 'error'
+                      }
                     />
                   </View>
                 </TouchableOpacity>
@@ -253,12 +310,16 @@ export default function DashboardScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
+
   topBar: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: spacing.xl, paddingVertical: spacing.md,
+    flexDirection:  'row',
+    justifyContent: 'space-between',
+    alignItems:     'center',
+    paddingHorizontal: spacing.xl,
+    paddingVertical:   spacing.md,
   },
   greeting:  { ...typography.xs, color: colors.textTertiary },
-  userName:  { ...typography.h3, color: colors.text, marginTop: 2, maxWidth: 180 },
+  userName:  { ...typography.h3, color: colors.text, marginTop: 2 },
   topRight:  { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
   topBtn: {
     width: 42, height: 42, borderRadius: 21,
@@ -271,11 +332,16 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   avatarText: { fontSize: 16, fontWeight: '700' as const, color: colors.teal },
+
+  heroWrap: { paddingHorizontal: spacing.xl, marginBottom: spacing.lg },
   heroCard: {
-    marginHorizontal: spacing.xl, borderRadius: radius.xxl,
-    padding: spacing.xl, borderWidth: 1, borderColor: colors.border, ...shadow.lg,
+    borderRadius: radius.xxl, padding: spacing.xl,
+    borderWidth: 1, borderColor: colors.border, ...shadow.lg,
   },
-  heroLabelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.xs },
+  heroLabelRow: {
+    flexDirection: 'row', justifyContent: 'space-between',
+    alignItems: 'center', marginBottom: spacing.xs,
+  },
   heroLabel: { ...typography.sm, color: colors.textTertiary },
   heroValue: { ...typography.display, color: colors.text, marginBottom: spacing.xl },
   quickRow:  { flexDirection: 'row', justifyContent: 'space-between' },
@@ -286,27 +352,31 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   quickLabel: { ...typography.xs, color: colors.textSecondary, fontWeight: '600' as const },
+
   sectionRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: spacing.xl, marginTop: spacing.xl, marginBottom: spacing.md,
   },
   sectionTitle: { ...typography.h4, color: colors.text },
   seeAll:       { ...typography.sm, color: colors.teal, fontWeight: '600' as const },
-  assetList:    { paddingHorizontal: spacing.xl, gap: spacing.sm },
+
+  assetList: { paddingHorizontal: spacing.xl, gap: spacing.sm },
   assetRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: colors.surface, padding: spacing.md,
     borderRadius: radius.xl, borderWidth: 1, borderColor: colors.border,
   },
-  assetName:  { ...typography.h5, color: colors.text },
-  chainRow:   { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
-  noBalance:  { ...typography.xs, color: colors.textTertiary },
-  assetAmt:   { ...typography.h5, color: colors.text },
-  assetSym:   { ...typography.xs, color: colors.textTertiary, marginTop: 2 },
-  txList:     { paddingHorizontal: spacing.xl, marginTop: spacing.xs },
+  assetName: { ...typography.h5, color: colors.text },
+  chainRow:  { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
+  noBalance: { ...typography.xs, color: colors.textTertiary },
+  assetAmt:  { ...typography.h5, color: colors.text },
+  assetSym:  { ...typography.xs, color: colors.textTertiary, marginTop: 2 },
+
+  txList:  { paddingHorizontal: spacing.xl, marginTop: spacing.xs },
   txRow: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.md,
-    paddingVertical: spacing.sm + 2, borderBottomWidth: 1, borderBottomColor: colors.border,
+    paddingVertical: spacing.sm + 2,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
   },
   txIcon:     { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   txTitle:    { ...typography.sm, color: colors.text, fontWeight: '600' as const },
@@ -314,5 +384,5 @@ const styles = StyleSheet.create({
   txAmt:      { ...typography.sm, fontWeight: '700' as const, marginBottom: 2 },
   emptyBox:   { alignItems: 'center', paddingVertical: spacing.xxxl, gap: spacing.sm },
   emptyText:  { ...typography.h5, color: colors.textSecondary },
-  emptySubText:{ ...typography.xs, color: colors.textTertiary },
+  emptySubText: { ...typography.xs, color: colors.textTertiary },
 });
