@@ -71,7 +71,7 @@ export default function TwoFactorSetupScreen() {
       <SafeAreaView style={styles.flex} edges={[]}>
         <Header title="Two-Factor Auth" />
         <View style={styles.flex}>
-          <View style={styles.centerFill}>
+          <View style={[styles.centerFill, { bottom: insets.bottom + 75 }]} >
             <View style={[styles.bigIcon, { backgroundColor: colors.successBg, borderColor: colors.success + '50' }]}>
               <Ionicons name="shield-checkmark" size={44} color={colors.success} />
             </View>
@@ -81,7 +81,7 @@ export default function TwoFactorSetupScreen() {
             </Text>
           </View>
           {/* Absolute footer — always visible regardless of content */}
-          <View style={[styles.footer, { bottom: insets.bottom + 8 }]}>
+          <View style={[styles.footer, { bottom: insets.bottom + 75 }]}>
             <Button label="Done" onPress={() => setStep('intro')} />
           </View>
         </View>

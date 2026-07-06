@@ -15,8 +15,16 @@ class ApiService {
 
     // Auto-attach token
     this.client.interceptors.request.use(async (config) => {
-      const token = await SecureStore.getItemAsync('accessToken');
-      if (token) config.headers.Authorization = `Bearer ${token}`;
+      try {
+        const token = await SecureStore.getItemAsync('accessToken');
+        if (token) config.headers.Authorization = `Bearer ${token}`;
+      } catch {
+        // Corrupted/undecryptable value (e.g. keychain/keystore mismatch after
+        // a reinstall) — clear it so we don't keep failing every request,
+        // including unrelated calls like login/register's own getMe() check.
+        await SecureStore.deleteItemAsync('accessToken').catch(() => {});
+        await SecureStore.deleteItemAsync('refreshToken').catch(() => {});
+      }
       return config;
     });
 
@@ -55,13 +63,18 @@ class ApiService {
   changePassword = (d: any)  => this.client.post('/auth/change-password', d).then(r => r.data);
 
   // ─── Wallet ───────────────────────────────────────────────────────────────
-  createWallet     = ()             => this.client.post('/wallet/create').then(r => r.data);
-  importWallet     = (d: any)       => this.client.post('/wallet/import', d).then(r => r.data);
-  getAddresses     = ()             => this.client.get('/wallet/addresses').then(r => r.data);
-  getBalances      = ()             => this.client.get('/wallet/balances').then(r => r.data);
-  sendToken        = (d: any)       => this.client.post('/wallet/send', d).then(r => r.data);
-  getTransactions  = (p=1, l=20)   => this.client.get(`/wallet/transactions?page=${p}&limit=${l}`).then(r => r.data);
-  getTransaction   = (id: string)   => this.client.get(`/wallet/transactions/${id}`).then(r => r.data);
+  createWallet     = (d?: { label?: string })  => this.client.post('/wallet/create', d ?? {}).then(r => r.data);
+  importWallet     = (d: any)                  => this.client.post('/wallet/import', d).then(r => r.data);
+  getWallets       = ()                        => this.client.get('/wallet/list').then(r => r.data);
+  renameWallet     = (walletIndex: number, label: string) => this.client.patch('/wallet/rename', { walletIndex, label }).then(r => r.data);
+  getAddresses     = (walletIndex = 0)         => this.client.get(`/wallet/addresses?walletIndex=${walletIndex}`).then(r => r.data);
+  getBalances      = (walletIndex = 0)         => this.client.get(`/wallet/balances?walletIndex=${walletIndex}`).then(r => r.data);
+  sendToken        = (d: any)                  => this.client.post('/wallet/send', d).then(r => r.data);
+  getTransactions  = (p = 1, l = 20, walletIndex?: number) => {
+    const idx = walletIndex !== undefined ? `&walletIndex=${walletIndex}` : '';
+    return this.client.get(`/wallet/transactions?page=${p}&limit=${l}${idx}`).then(r => r.data);
+  };
+  getTransaction   = (id: string)              => this.client.get(`/wallet/transactions/${id}`).then(r => r.data);
 
   // ─── Bridge ───────────────────────────────────────────────────────────────
   initiateBridge   = (d: any)       => this.client.post('/bridge/initiate', d).then(r => r.data);

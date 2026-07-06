@@ -208,7 +208,7 @@ export class ListenerService implements OnModuleInit {
   // is far more reliable and easy to debug, so it now runs for every EVM chain
   // as the primary confirmation path; WS is just a low-latency bonus on top.
 
-  @Cron('*/15 * * * * *') // every 15 seconds
+  @Cron('*/60 * * * * *') // every 60 seconds
   async pollEvmTokenTransfersAll() {
     const chains: Array<[string, string | undefined]> = [
       ['ethereum', process.env.ETH_RPC],
@@ -271,7 +271,7 @@ export class ListenerService implements OnModuleInit {
 
   // ─── Polling fallback — TRON (no native WSS event subscriptions) ──────────────
 
-  @Cron('*/10 * * * * *') // every 10 seconds
+  @Cron('*/30 * * * * *') // every 30 seconds
   async pollTronTokenTransfers() {
     const TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
 

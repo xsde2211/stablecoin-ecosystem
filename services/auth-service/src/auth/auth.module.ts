@@ -4,7 +4,7 @@ import { PassportModule } from '@nestjs/passport';
 import { AuthController }      from './auth.controller';
 import { AuthService }         from './auth.service';
 import { JwtStrategy }         from './jwt.strategy';
-import { JwtRefreshStrategy }  from './jwt-refresh.strategy';
+import { JwtRefreshGuard } from './jwt-refresh.guard';
 
 @Module({
   imports: [
@@ -12,7 +12,7 @@ import { JwtRefreshStrategy }  from './jwt-refresh.strategy';
     JwtModule.register({ secret: process.env.JWT_SECRET }),
   ],
   controllers: [AuthController],
-  providers:   [AuthService, JwtStrategy, JwtRefreshStrategy],
-  exports:     [JwtStrategy, JwtRefreshStrategy],
+  providers:   [AuthService, JwtStrategy, JwtRefreshGuard],
+  exports:     [JwtStrategy, JwtRefreshGuard],
 })
 export class AuthModule {}

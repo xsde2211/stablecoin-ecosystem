@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "User" ALTER COLUMN "kycStatus" SET DEFAULT 'NOT_SUBMITTED';

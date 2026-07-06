@@ -40,7 +40,19 @@ export const loginUser = createAsyncThunk(
     const data = await api.login(creds);
     await SecureStore.setItemAsync('accessToken',  data.accessToken);
     await SecureStore.setItemAsync('refreshToken', data.refreshToken);
-    const user = await api.getMe();
+
+    // Login itself succeeded and tokens are already stored — don't let a
+    // flaky/failed profile fetch turn a successful login into a rejected
+    // thunk. That would leave isAuthenticated false and strand the user on
+    // the login screen even though they're holding valid tokens, since
+    // nothing downstream (AppNavigator) would ever see them as logged in.
+    let user = null;
+    try {
+      user = await api.getMe();
+    } catch {
+      // non-fatal — profile can be refetched later (e.g. next app hydrate)
+    }
+
     return { ...data, user };
   }
 );
@@ -52,7 +64,16 @@ export const registerUser = createAsyncThunk(
     const data = await api.register(body);
     await SecureStore.setItemAsync('accessToken',  data.accessToken);
     await SecureStore.setItemAsync('refreshToken', data.refreshToken);
-    const user = await api.getMe();
+
+    // Same reasoning as loginUser above — registration + token storage
+    // already succeeded by this point; a getMe() hiccup shouldn't discard that.
+    let user = null;
+    try {
+      user = await api.getMe();
+    } catch {
+      // non-fatal — profile can be refetched later (e.g. next app hydrate)
+    }
+
     return { ...data, user };
   }
 );

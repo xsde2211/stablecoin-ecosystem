@@ -20,17 +20,15 @@ import type { AppDispatch }     from '../../store';
 const K_BIO   = '@pref_biometric';
 const K_PUSH  = '@pref_push';
 const K_EMAIL = '@pref_email';
+const K_WALLETS = '@wallets_meta';
 
-// Same status set as KycScreen — kept condensed for a single settings row.
-// NOTE: 'Kyc' below must match whatever route name your navigator registers
-// KycScreen under — change it if your app uses a different route name.
 const KYC_ROUTE = 'Kyc';
 
 const KYC_CFG: Record<string, { icon: any; color: string; label: string; action: string }> = {
-  NOT_SUBMITTED: { icon: 'shield-outline',        color: colors.textSecondary, label: 'Not submitted', action: 'Start Verification' },
-  SUBMITTED:     { icon: 'time-outline',          color: colors.warning,       label: 'Under review',  action: 'Refresh Status' },
-  APPROVED:      { icon: 'shield-checkmark',       color: colors.success,       label: 'Verified',      action: 'View' },
-  REJECTED:      { icon: 'close-circle',           color: colors.error,         label: 'Rejected',      action: 'Resubmit KYC' },
+  NOT_SUBMITTED: { icon: 'shield-outline',   color: colors.textSecondary, label: 'Not submitted', action: 'Start' },
+  SUBMITTED:     { icon: 'time-outline',     color: colors.warning,       label: 'Under review',  action: 'Refresh' },
+  APPROVED:      { icon: 'shield-checkmark', color: colors.success,       label: 'Verified ✓',    action: 'View' },
+  REJECTED:      { icon: 'close-circle',     color: colors.error,         label: 'Rejected',      action: 'Resubmit' },
 };
 
 export default function SettingsScreen() {
@@ -41,32 +39,9 @@ export default function SettingsScreen() {
   const [bioEnabled,   setBioEnabled]   = useState(false);
   const [pushEnabled,  setPushEnabled]  = useState(false);
   const [emailEnabled, setEmailEnabled] = useState(false);
-
-  // ── KYC status ──────────────────────────────────────────────────────────
-  const [kycStatus,  setKycStatus]  = useState('NOT_SUBMITTED');
-  const [kycLoading, setKycLoading] = useState(true);
-
-  const loadKyc = useCallback(async () => {
-    try {
-      const res = await api.getKycStatus();
-      setKycStatus(res?.kycStatus ?? 'NOT_SUBMITTED');
-    } catch {
-      // leave last-known status on failure rather than resetting
-    } finally {
-      setKycLoading(false);
-    }
-  }, []);
-
-  // Refresh every time this screen regains focus — e.g. returning from the
-  // KYC form, or coming back after admin approval — so the status shown here
-  // always reflects the latest backend state without a manual pull-to-refresh.
-  useFocusEffect(
-    useCallback(() => {
-      loadKyc();
-    }, [loadKyc])
-  );
-
-  const kcfg = KYC_CFG[kycStatus] ?? KYC_CFG.NOT_SUBMITTED;
+  const [kycStatus,    setKycStatus]    = useState('NOT_SUBMITTED');
+  const [kycLoading,   setKycLoading]   = useState(true);
+  const [walletCount,  setWalletCount]  = useState(1);
 
   const [showPwd,    setShowPwd]    = useState(false);
   const [curPwd,     setCurPwd]     = useState('');
@@ -75,6 +50,21 @@ export default function SettingsScreen() {
   const [showCur,    setShowCur]    = useState(false);
   const [showNew,    setShowNew]    = useState(false);
   const [pwdLoading, setPwdLoading] = useState(false);
+
+  const loadKyc = useCallback(async () => {
+    try {
+      const res = await api.getKycStatus();
+      setKycStatus(res?.kycStatus ?? 'NOT_SUBMITTED');
+    } catch {} finally { setKycLoading(false); }
+  }, []);
+
+  const loadWalletCount = useCallback(async () => {
+    const raw = await AsyncStorage.getItem(K_WALLETS);
+    const metas = raw ? JSON.parse(raw) : [];
+    setWalletCount(metas.length || 1);
+  }, []);
+
+  useFocusEffect(useCallback(() => { loadKyc(); loadWalletCount(); }, [loadKyc, loadWalletCount]));
 
   useEffect(() => {
     (async () => {
@@ -93,6 +83,8 @@ export default function SettingsScreen() {
     })();
   }, []);
 
+  const kcfg = KYC_CFG[kycStatus] ?? KYC_CFG.NOT_SUBMITTED;
+
   const toggleBiometric = async (v: boolean) => {
     if (v) {
       if (!bioSupported) { Alert.alert('Not available', 'Biometric hardware not found or no fingerprint/face enrolled.'); return; }
@@ -107,7 +99,7 @@ export default function SettingsScreen() {
     if (v) {
       const { status } = await Notifications.requestPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission denied', 'Enable notifications in Settings → Apps → Stablecoin Wallet.', [
+        Alert.alert('Permission denied', 'Enable notifications in Settings → Apps.', [
           { text: 'Open Settings', onPress: () => Linking.openSettings() },
           { text: 'Cancel', style: 'cancel' },
         ]);
@@ -125,18 +117,18 @@ export default function SettingsScreen() {
   const toggleEmail = async (v: boolean) => {
     setEmailEnabled(v);
     await AsyncStorage.setItem(K_EMAIL, String(v));
-    if (v) Alert.alert('Email alerts on', 'You\'ll receive login and transaction alerts at your registered email.');
+    if (v) Alert.alert('Email alerts on', "You'll receive login and transaction alerts at your registered email.");
   };
 
   const openURL = async (url: string) => {
     const ok = await Linking.canOpenURL(url).catch(() => false);
     if (ok) Linking.openURL(url);
-    else Alert.alert('Coming soon', 'Our Terms and Privacy Policy will be available at launch. Please check back later.');
+    else Alert.alert('Coming soon', 'Our Terms and Privacy Policy will be available at launch.');
   };
 
   const handleChangePwd = async () => {
     if (!curPwd || !newPwd || !confirmPwd) { Alert.alert('Fill all fields'); return; }
-    if (newPwd !== confirmPwd)             { Alert.alert('New passwords don\'t match'); return; }
+    if (newPwd !== confirmPwd)             { Alert.alert("New passwords don't match"); return; }
     if (newPwd.length < 8)                { Alert.alert('Password too short', 'Minimum 8 characters.'); return; }
     if (!/[A-Z]/.test(newPwd))            { Alert.alert('Weak password', 'Include at least one uppercase letter.'); return; }
     if (!/\d/.test(newPwd))               { Alert.alert('Weak password', 'Include at least one number.'); return; }
@@ -156,7 +148,7 @@ export default function SettingsScreen() {
       { text: 'Log out', style: 'destructive', onPress: () => dispatch(logout()) },
     ]);
 
-  const pwdStrength = [newPwd.length >= 8, /[A-Z]/.test(newPwd), /[a-z]/.test(newPwd), /\d/.test(newPwd)];
+  const pwdStrength   = [newPwd.length >= 8, /[A-Z]/.test(newPwd), /[a-z]/.test(newPwd), /\d/.test(newPwd)];
   const strengthLevel = pwdStrength.filter(Boolean).length;
 
   return (
@@ -164,7 +156,28 @@ export default function SettingsScreen() {
       <Header title="Settings" />
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
 
-        {/* ── Identity Verification (KYC) ──────────────────────────────── */}
+        {/* ── Wallets ───────────────────────────────────────────────── */}
+        <Text style={styles.sec}>Wallets</Text>
+        <Card padding={0}>
+          <TouchableOpacity
+            style={styles.row}
+            onPress={() => navigation.navigate('WalletManager')}
+            activeOpacity={0.7}
+          >
+            <View style={styles.rowIcon}>
+              <Ionicons name="wallet-outline" size={18} color={colors.teal} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>Manage Wallets</Text>
+              <Text style={styles.rowSub}>
+                {walletCount} wallet{walletCount !== 1 ? 's' : ''} · Tap to view addresses, create or import
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={colors.textTertiary} />
+          </TouchableOpacity>
+        </Card>
+
+        {/* ── Identity Verification (KYC) ──────────────────────────── */}
         <Text style={styles.sec}>Identity Verification</Text>
         <Card padding={0}>
           <TouchableOpacity
@@ -193,7 +206,6 @@ export default function SettingsScreen() {
         {/* ── Security ──────────────────────────────────────────────── */}
         <Text style={styles.sec}>Security</Text>
         <Card padding={0}>
-          {/* Change Password */}
           <TouchableOpacity style={[styles.row, !showPwd && styles.rowBorder]} onPress={() => setShowPwd(!showPwd)} activeOpacity={0.7}>
             <View style={styles.rowIcon}><Ionicons name="key-outline" size={18} color={colors.textSecondary} /></View>
             <Text style={styles.rowLabel}>Change Password</Text>
@@ -219,8 +231,6 @@ export default function SettingsScreen() {
               </View>
             </View>
           )}
-
-          {/* Biometric */}
           <View style={[styles.row, styles.rowBorder]}>
             <View style={styles.rowIcon}><Ionicons name="finger-print-outline" size={18} color={colors.textSecondary} /></View>
             <View style={{ flex: 1 }}>
@@ -229,8 +239,6 @@ export default function SettingsScreen() {
             </View>
             <Switch value={bioEnabled} onValueChange={toggleBiometric} disabled={!bioSupported} trackColor={{ false: colors.border, true: colors.teal }} thumbColor="#fff" />
           </View>
-
-          {/* 2FA */}
           <View style={styles.row}>
             <View style={styles.rowIcon}><Ionicons name="shield-checkmark-outline" size={18} color={colors.textSecondary} /></View>
             <Text style={[styles.rowLabel, { flex: 1 }]}>Two-Factor Auth</Text>
@@ -247,7 +255,7 @@ export default function SettingsScreen() {
             <View style={styles.rowIcon}><Ionicons name="notifications-outline" size={18} color={colors.textSecondary} /></View>
             <View style={{ flex: 1 }}>
               <Text style={styles.rowLabel}>Push Notifications</Text>
-              <Text style={styles.rowSub}>{pushEnabled ? 'Enabled — you\'ll get real-time alerts' : 'Tap to enable transaction alerts'}</Text>
+              <Text style={styles.rowSub}>{pushEnabled ? "Enabled — you'll get real-time alerts" : 'Tap to enable transaction alerts'}</Text>
             </View>
             <Switch value={pushEnabled} onValueChange={togglePush} trackColor={{ false: colors.border, true: colors.teal }} thumbColor="#fff" />
           </View>

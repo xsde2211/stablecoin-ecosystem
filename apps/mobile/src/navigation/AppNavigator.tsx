@@ -26,6 +26,7 @@ import ProfileScreen          from '../screens/profile/ProfileScreen';
 import TwoFactorSetupScreen   from '../screens/profile/TwoFactorSetupScreen';
 import MerchantRegisterScreen from '../screens/profile/MerchantRegisterScreen';
 import SettingsScreen         from '../screens/settings/SettingsScreen';
+import WalletManagerScreen    from '../screens/wallet/WalletManagerScreen';
 import NotificationsScreen    from '../screens/notifications/NotificationsScreen';
 
 import { colors } from '../theme';
@@ -59,6 +60,7 @@ function DashboardStack() {
       <Stack.Screen name="Kyc"              component={KycScreen} />
       <Stack.Screen name="Notifications"    component={NotificationsScreen} />
       <Stack.Screen name="MerchantRegister" component={MerchantRegisterScreen} />
+      <Stack.Screen name="WalletManager"    component={WalletManagerScreen} />
     </Stack.Navigator>
   );
 }
@@ -90,6 +92,8 @@ function ProfileStack() {
       <Stack.Screen name="MerchantRegister" component={MerchantRegisterScreen} />
       <Stack.Screen name="Kyc"              component={KycScreen} />
       <Stack.Screen name="Notifications"    component={NotificationsScreen} />
+      {/* WalletManager registered here so Settings can navigate to it */}
+      <Stack.Screen name="WalletManager"    component={WalletManagerScreen} />
     </Stack.Navigator>
   );
 }
@@ -113,7 +117,13 @@ function MainTabs() {
             ProfileTab:     ['person-circle',   'person-circle-outline'],
           };
           const [active, inactive] = icons[route.name] ?? ['ellipse', 'ellipse-outline'];
-          return <Ionicons name={(focused ? active : inactive) as any} size={focused ? 24 : 22} color={color} />;
+          return (
+            <Ionicons
+              name={(focused ? active : inactive) as any}
+              size={focused ? 24 : 22}
+              color={color}
+            />
+          );
         },
       })}
     >
@@ -135,14 +145,25 @@ export default function AppNavigator() {
 
   return (
     <NavigationContainer>
-      {!isAuthenticated ? (
-          <AuthStack />
-      ) : !walletReady ? (
-          <WalletSetupScreen />
-      ) : (
-          <MainTabs />
-      )}
-    </NavigationContainer>
+  <Stack.Navigator screenOptions={{ headerShown: false }}>
+    {!isAuthenticated ? (
+      <Stack.Screen
+        name="Auth"
+        component={AuthStack}
+      />
+    ) : !walletReady ? (
+      <Stack.Screen
+        name="WalletSetupModal"
+        component={WalletSetupScreen}
+      />
+    ) : (
+      <Stack.Screen
+        name="Main"
+        component={MainTabs}
+      />
+    )}
+  </Stack.Navigator>
+</NavigationContainer>
   );
 }
 

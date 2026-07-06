@@ -14,8 +14,7 @@ import {
   deriveAllAddresses,
 } from '@ecosystem/crypto';
 
-// Converts BigInt fields to string so JSON.stringify doesn't crash.
-// Affects: blockNumber (BigInt), gasUsed (Decimal), amount (Decimal)
+// Converts BigInt / Decimal fields to string so JSON.stringify never crashes.
 function serializeTx(tx: any) {
   return {
     ...tx,
@@ -24,6 +23,9 @@ function serializeTx(tx: any) {
     amount:      tx.amount      != null ? tx.amount.toString()      : null,
   };
 }
+
+const ALL_CHAINS = ['tron', 'ethereum', 'bsc', 'polygon', 'solana'] as const;
+type Chain = typeof ALL_CHAINS[number];
 
 @Injectable()
 export class WalletService {
@@ -35,88 +37,167 @@ export class WalletService {
     private chain:  ChainService,
   ) {}
 
-  // ─── Create wallet ───────────────────────────────────────────────────────────
+  // ─── Helper: next available wallet index for a user ────────────────────────
 
-  async createWallet(userId: string) {
-    const existing = await this.prisma.wallet.findFirst({
-      where: { userId, chain: 'tron' },
+  private async nextWalletIndex(userId: string): Promise<number> {
+    const last = await this.prisma.wallet.findFirst({
+      where:   { userId },
+      orderBy: { walletIndex: 'desc' },
+      select:  { walletIndex: true },
     });
-    if (existing) throw new BadRequestException('Wallet already exists for this user');
+    return (last?.walletIndex ?? -1) + 1;
+  }   
 
-    const mnemonic  = generateMnemonic();
-    const addresses = deriveAllAddresses(mnemonic);
-    const encrypted = await this.kms.encrypt(mnemonic);
+  // ─── Helper: get active walletIndex for a user ─────────────────────────────
+  // Stored as a Redis/DB concept; for simplicity we store in a separate small
+  // table. Since we don't have one, we use the lowest walletIndex that exists.
+  // The frontend stores the active index in AsyncStorage and sends it as a
+  // query param when needed. For the default (no param), we use index 0.
 
-    const chains = ['tron', 'ethereum', 'bsc', 'polygon', 'solana'] as const;
+  private async getActiveWalletIndex(userId: string, requestedIndex?: number): Promise<number> {
+    const idx = requestedIndex ?? 0;
+    const exists = await this.prisma.wallet.findFirst({
+      where: { userId, walletIndex: idx },
+    });
+    if (!exists) {
+      // Fall back to index 0
+      return 0;
+    }
+    return idx;
+  }
+
+  // ─── Create wallet ───────────────────────────────────────────────────────────
+  // Now supports multiple wallets. Each call creates a new wallet with the next
+  // available walletIndex for that user.
+
+  async createWallet(userId: string, label?: string) {
+    const walletIndex = await this.nextWalletIndex(userId);
+    const mnemonic    = generateMnemonic();
+    const addresses   = deriveAllAddresses(mnemonic);
+    const encrypted   = await this.kms.encrypt(mnemonic);
+    const walletLabel = label ?? `Wallet ${walletIndex + 1}`;
 
     await this.prisma.$transaction(
-      chains.map(c =>
+      ALL_CHAINS.map(c =>
         this.prisma.wallet.create({
           data: {
             userId,
             chain:         c,
-            // Store EVM addresses lowercase — listener Transfer events arrive
-            // checksummed (0xAbCd…) so we need consistent casing for lookups
             address:       c === 'tron' ? addresses[c] : addresses[c].toLowerCase(),
             encPrivateKey: encrypted,
+            walletIndex,
+            label:         walletLabel,
           },
         })
       )
     );
 
-    this.logger.log(`Wallet created for user ${userId}`);
-    return { mnemonic, addresses };
+    this.logger.log(`Wallet ${walletIndex} (${walletLabel}) created for user ${userId}`);
+    return { walletIndex, label: walletLabel, mnemonic, addresses };
   }
 
   // ─── Import wallet ───────────────────────────────────────────────────────────
 
-  async importWallet(userId: string, mnemonic: string) {
+  async importWallet(userId: string, mnemonic: string, label?: string) {
     if (!validateMnemonic(mnemonic)) {
       throw new BadRequestException('Invalid mnemonic phrase');
     }
 
-    const addresses = deriveAllAddresses(mnemonic);
-    const encrypted = await this.kms.encrypt(mnemonic);
-    const chains    = ['tron', 'ethereum', 'bsc', 'polygon', 'solana'] as const;
+    const addresses   = deriveAllAddresses(mnemonic);
+    const encrypted   = await this.kms.encrypt(mnemonic);
+    const walletIndex = await this.nextWalletIndex(userId);
+    const walletLabel = label ?? `Imported Wallet ${walletIndex + 1}`;
 
-    for (const c of chains) {
-      await this.prisma.wallet.upsert({
-        where:  { userId_chain: { userId, chain: c } },
-        update: {
-          address:       c === 'tron' ? addresses[c] : addresses[c].toLowerCase(),
-          encPrivateKey: encrypted,
-        },
-        create: {
-          userId,
-          chain:         c,
-          address:       c === 'tron' ? addresses[c] : addresses[c].toLowerCase(),
-          encPrivateKey: encrypted,
-        },
-      });
+    await this.prisma.$transaction(
+      ALL_CHAINS.map(c =>
+        this.prisma.wallet.create({
+          data: {
+            userId,
+            chain:         c,
+            address:       c === 'tron' ? addresses[c] : addresses[c].toLowerCase(),
+            encPrivateKey: encrypted,
+            walletIndex,
+            label:         walletLabel,
+          },
+        })
+      )
+    );
+
+    this.logger.log(`Wallet ${walletIndex} imported for user ${userId}`);
+    return { walletIndex, label: walletLabel, addresses };
+  }
+
+  // ─── Get all wallets for a user ───────────────────────────────────────────────
+  // Returns one entry per wallet (grouped by walletIndex), not one per chain.
+
+  async getWallets(userId: string) {
+    const rows = await this.prisma.wallet.findMany({
+      where:   { userId },
+      select:  { walletIndex: true, label: true, chain: true, address: true, createdAt: true },
+      orderBy: [{ walletIndex: 'asc' }, { chain: 'asc' }],
+    });
+
+    // Group by walletIndex
+    const grouped: Record<number, any> = {};
+    for (const row of rows) {
+      if (!grouped[row.walletIndex]) {
+        grouped[row.walletIndex] = {
+          walletIndex: row.walletIndex,
+          label:       row.label ?? `Wallet ${row.walletIndex + 1}`,
+          createdAt:   row.createdAt,
+          addresses:   {} as Record<string, string>,
+        };
+      }
+      grouped[row.walletIndex].addresses[row.chain] = row.address;
     }
 
-    return { addresses };
+    return Object.values(grouped);
   }
 
-  // ─── Get addresses ───────────────────────────────────────────────────────────
+  // ─── Rename a wallet ──────────────────────────────────────────────────────────
 
-  async getAddresses(userId: string) {
+  async renameWallet(userId: string, walletIndex: number, label: string) {
+    const count = await this.prisma.wallet.count({
+      where: { userId, walletIndex },
+    });
+    if (!count) throw new NotFoundException(`Wallet ${walletIndex} not found`);
+
+    await this.prisma.wallet.updateMany({
+      where: { userId, walletIndex },
+      data:  { label },
+    });
+
+    return { walletIndex, label };
+  }
+
+  // ─── Get addresses ─────────────────────────────────────────────────────────────
+  // walletIndex defaults to 0 (first wallet). Frontend passes ?walletIndex=N.
+
+  async getAddresses(userId: string, walletIndex = 0) {
     const wallets = await this.prisma.wallet.findMany({
-      where:  { userId },
+      where:  { userId, walletIndex },
       select: { chain: true, address: true },
     });
-    if (!wallets.length) throw new NotFoundException('No wallet found');
+    if (!wallets.length) {
+      // Fall back to walletIndex 0 if the requested one doesn't exist
+      const fallback = await this.prisma.wallet.findMany({
+        where:  { userId, walletIndex: 0 },
+        select: { chain: true, address: true },
+      });
+      if (!fallback.length) throw new NotFoundException('No wallet found');
+      return fallback.reduce((acc, w) => { acc[w.chain] = w.address; return acc; }, {} as Record<string, string>);
+    }
 
-    return wallets.reduce((acc, w) => {
-      acc[w.chain] = w.address;
-      return acc;
-    }, {} as Record<string, string>);
+    return wallets.reduce((acc, w) => { acc[w.chain] = w.address; return acc; }, {} as Record<string, string>);
   }
 
-  // ─── Get all balances ────────────────────────────────────────────────────────
+  // ─── Get all balances ──────────────────────────────────────────────────────────
+  // walletIndex defaults to 0.
 
-  async getAllBalances(userId: string) {
-    const wallets = await this.prisma.wallet.findMany({ where: { userId } });
+  async getAllBalances(userId: string, walletIndex = 0) {
+    const wallets = await this.prisma.wallet.findMany({
+      where: { userId, walletIndex },
+    });
     if (!wallets.length) throw new NotFoundException('No wallet found');
 
     const tokens  = ['INRX', 'EGOLD', 'ESLVR'];
@@ -127,26 +208,23 @@ export class WalletService {
         const tokenAddress = this.chain.getTokenAddress(wallet.chain, symbol);
         if (!tokenAddress) continue;
 
-        const balance = await this.chain.getBalance(
-          wallet.chain,
-          wallet.address,
-          tokenAddress,
-        );
-
-        results.push({ chain: wallet.chain, address: wallet.address, symbol, balance });
+        const balance = await this.chain.getBalance(wallet.chain, wallet.address, tokenAddress);
+        results.push({ chain: wallet.chain, address: wallet.address, symbol, balance, walletIndex });
       }
     }
 
     return results;
   }
 
-  // ─── Send tokens ─────────────────────────────────────────────────────────────
+  // ─── Send tokens ───────────────────────────────────────────────────────────────
+  // walletIndex specifies which wallet to send from.
 
-  async sendToken(userId: string, dto: SendTokenDto) {
-    const wallet = await this.prisma.wallet.findUnique({
-      where: { userId_chain: { userId, chain: dto.chain } },
+  async sendToken(userId: string, dto: SendTokenDto & { walletIndex?: number }) {
+    const walletIndex  = dto.walletIndex ?? 0;
+    const wallet = await this.prisma.wallet.findFirst({
+      where: { userId, chain: dto.chain, walletIndex },
     });
-    if (!wallet) throw new NotFoundException('Wallet not found for this chain');
+    if (!wallet) throw new NotFoundException(`Wallet ${walletIndex} not found for chain ${dto.chain}`);
 
     const tokenAddress = this.chain.getTokenAddress(dto.chain, dto.token);
     if (!tokenAddress) throw new BadRequestException('Token not supported on this chain');
@@ -174,18 +252,19 @@ export class WalletService {
       },
     });
 
-    this.logger.log(`Token sent: ${txHash} on ${dto.chain}`);
-    return { txHash, status: 'PENDING' };
+    this.logger.log(`[wallet ${walletIndex}] Token sent: ${txHash} on ${dto.chain}`);
+    return { txHash, status: 'PENDING', walletIndex };
   }
 
-  // ─── Transaction history ──────────────────────────────────────────────────────
-  // BigInt fix: blockNumber is stored as BigInt in DB.
-  // JSON.stringify (used by Express response) cannot serialize BigInt natively.
-  // serializeTx() converts all BigInt/Decimal fields to strings before return.
+  // ─── Transaction history ────────────────────────────────────────────────────────
+  // walletIndex = undefined means ALL wallets for this user.
 
-  async getTransactions(userId: string, page = 1, limit = 20) {
+  async getTransactions(userId: string, page = 1, limit = 20, walletIndex?: number) {
+    const walletWhere: any = { userId };
+    if (walletIndex !== undefined) walletWhere.walletIndex = walletIndex;
+
     const wallets = await this.prisma.wallet.findMany({
-      where:  { userId },
+      where:  walletWhere,
       select: { id: true },
     });
     const walletIds = wallets.map(w => w.id);
@@ -205,7 +284,7 @@ export class WalletService {
     return { data: data.map(serializeTx), total, page, limit };
   }
 
-  // ─── Get single transaction ──────────────────────────────────────────────────
+  // ─── Get single transaction ─────────────────────────────────────────────────────
 
   async getTransaction(userId: string, txId: string) {
     const wallets   = await this.prisma.wallet.findMany({

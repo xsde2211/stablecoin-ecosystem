@@ -11,16 +11,19 @@ import { RedisService }       from '../redis/redis.service';
 import { InitiateBridgeDto }  from './dto/initiate-bridge.dto';
 import { BurnBridgeDto }      from './dto/burn-bridge.dto';
 
-// Updated BridgeV2 ABI — includes lock, burn, unlock, mint
+// Updated BridgeV2 ABI — matches the REAL deployed StablecoinBridgeV2.sol.
+// mint()/unlock() take a BridgeRequest struct + validator signatures verified
+// on-chain via ECDSA.recover() — there is no mintTokens() function; the
+// previous ABI here didn't match the contract at all.
 const BRIDGE_V2_ABI = [
   // Lock: user → bridge on source chain
   'function lock(bytes32 tokenId, uint256 amount, uint256 dstChainId, address dstRecipient, uint256 nonce, uint256 deadline)',
   // Burn: user burns bridged tokens on destination to return
   'function burn(bytes32 tokenId, uint256 amount, uint256 srcChainId, address srcRecipient, uint256 nonce, uint256 deadline)',
-  // Mint: relayer mints on destination after validators sign
-  'function mintTokens(bytes32 tokenId, address recipient, uint256 amount, string srcChain, bytes32 srcNonce, bytes[] signatures)',
-  // Unlock: relayer unlocks on source after burn on destination
-  'function unlock(bytes32 tokenId, address recipient, uint256 amount, uint256 srcChainId, bytes32 nonceKey, bytes[] signatures)',
+  // Mint: relayer calls after collecting >= requiredValidators signatures over the request hash
+  'function mint(tuple(bytes32 tokenId, address from, address to, uint256 amount, uint256 srcChainId, uint256 dstChainId, uint256 nonce, uint256 deadline) req, bytes[] sigs)',
+  // Unlock: relayer calls on the ORIGINAL chain after a burn on the destination chain
+  'function unlock(tuple(bytes32 tokenId, address from, address to, uint256 amount, uint256 srcChainId, uint256 dstChainId, uint256 nonce, uint256 deadline) req, bytes[] sigs)',
   'function paused() view returns (bool)',
   'event TokensLocked(bytes32 indexed tokenId, address indexed from, uint256 amount, uint256 dstChainId, address dstRecipient, uint256 nonce, uint256 deadline)',
   'event TokensMinted(bytes32 indexed tokenId, address indexed to, uint256 amount, uint256 srcChainId, bytes32 nonceKey)',
@@ -61,8 +64,8 @@ export class BridgeService {
     }
 
     // Get user wallet address for srcChain
-    const wallet = await this.prisma.wallet.findUnique({
-      where: { userId_chain: { userId, chain: dto.srcChain } },
+    const wallet = await this.prisma.wallet.findFirst({
+      where: { userId, chain: dto.srcChain, walletIndex: 0 },
     });
     if (!wallet) {
       throw new BadRequestException(`No wallet found for chain: ${dto.srcChain}. Create a wallet first.`);
@@ -111,8 +114,8 @@ export class BridgeService {
   // ─── Burn (BURN flow: user burns on dstChain to return to srcChain) ─────────
 
   async initiateBurn(userId: string, dto: BurnBridgeDto) {
-    const wallet = await this.prisma.wallet.findUnique({
-      where: { userId_chain: { userId, chain: dto.chain } },
+    const wallet = await this.prisma.wallet.findFirst({
+      where: { userId, chain: dto.chain, walletIndex: 0 },
     });
     if (!wallet) throw new BadRequestException(`No wallet for chain: ${dto.chain}`);
 
@@ -184,33 +187,75 @@ export class BridgeService {
     return { data, total, page, limit, totalPages: Math.ceil(total/limit) };
   }
 
-  // ─── Relayer: execute mint (called by validator/relayer service) ─────────────
+  // ─── Signing — matches contract's _hashRequest() + ECDSA.toEthSignedMessageHash exactly ───
+  //
+  // Contract: bytes32 msgHash = ECDSA.toEthSignedMessageHash(_hashRequest(req));
+  //           _hashRequest = keccak256(abi.encode(tokenId, from, to, amount, srcChainId, dstChainId, nonce, deadline))
+  // ethers' wallet.signMessage() applies the identical "\x19Ethereum Signed Message:\n32"
+  // prefix that toEthSignedMessageHash does, so signing the raw inner hash here
+  // reproduces exactly what hash.recover(sig) expects on-chain.
 
-  async executeMint(transferId: string, signatures: string[]) {
+  private buildBridgeRequest(params: {
+    token: string; from: string; to: string; amount: string;
+    srcChain: string; dstChain: string; nonce: string; deadline: Date;
+  }) {
+    return {
+      tokenId:    this.tokenIds[params.token],
+      from:       params.from,
+      to:         params.to,
+      amount:     ethers.parseUnits(params.amount, 6),
+      srcChainId: this.chainIds[params.srcChain],
+      dstChainId: this.chainIds[params.dstChain],
+      nonce:      BigInt(params.nonce),
+      deadline:   BigInt(Math.floor(params.deadline.getTime() / 1000)),
+    };
+  }
+
+  private async signBridgeRequest(req: ReturnType<BridgeService['buildBridgeRequest']>): Promise<string[]> {
+    const innerHash = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ['bytes32', 'address', 'address', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
+        [req.tokenId, req.from, req.to, req.amount, req.srcChainId, req.dstChainId, req.nonce, req.deadline],
+      ),
+    );
+
+    // REQUIRED_VALIDATORS=2 on the deployed contracts — use the first 2 of the
+    // 3 configured validator keys. All 3 are independently valid signers on-chain;
+    // any 2-of-3 combination satisfies the threshold.
+    const validatorKeys = [process.env.VALIDATOR_1_PRIVATE_KEY, process.env.VALIDATOR_2_PRIVATE_KEY]
+      .filter((k): k is string => !!k);
+
+    if (validatorKeys.length < 2) {
+      throw new Error('Need at least 2 validator private keys configured (VALIDATOR_1_PRIVATE_KEY, VALIDATOR_2_PRIVATE_KEY)');
+    }
+
+    return Promise.all(
+      validatorKeys.map((key) => new ethers.Wallet(key).signMessage(ethers.getBytes(innerHash))),
+    );
+  }
+
+  // ─── Relayer: execute mint (called automatically once a lock is confirmed) ───
+
+  async executeMint(transferId: string) {
     const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
     if (!transfer) throw new NotFoundException('Transfer not found');
     if (transfer.status !== 'LOCKED') {
       throw new BadRequestException(`Transfer status is ${transfer.status}, expected LOCKED`);
     }
 
-    const provider    = this.getProvider(transfer.dstChain);
+    const provider    = this.getProvider(transfer.dstChain); // mint executes on the destination chain
     const relayer     = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY!, provider);
     const bridgeAddr  = this.getBridgeAddress(transfer.dstChain);
     const bridge      = new ethers.Contract(bridgeAddr, BRIDGE_V2_ABI, relayer);
 
-    const tokenId  = this.tokenIds[transfer.token];
-    const srcNonce = ethers.keccak256(
-      ethers.AbiCoder.defaultAbiCoder().encode(
-        ['uint256','uint256'],
-        [this.chainIds[transfer.srcChain], BigInt(transfer.nonce)]
-      )
-    );
+    const req = this.buildBridgeRequest({
+      token: transfer.token, from: transfer.srcAddress, to: transfer.dstAddress,
+      amount: transfer.amount, srcChain: transfer.srcChain, dstChain: transfer.dstChain,
+      nonce: transfer.nonce, deadline: transfer.deadline,
+    });
+    const sigs = await this.signBridgeRequest(req);
 
-    const tx      = await bridge.mintTokens(
-      tokenId, transfer.dstAddress,
-      ethers.parseUnits(transfer.amount, 6),
-      transfer.srcChain, srcNonce, signatures,
-    );
+    const tx      = await bridge.mint(req, sigs);
     const receipt = await tx.wait();
 
     await this.prisma.bridgeTransfer.update({
@@ -222,34 +267,35 @@ export class BridgeService {
     return { txHash:receipt.hash, status:'COMPLETED' };
   }
 
-  // ─── Relayer: execute unlock ──────────────────────────────────────────────
+  // ─── Relayer: execute unlock (called automatically once a burn is confirmed) ──
 
-  async executeUnlock(transferId: string, signatures: string[]) {
+  async executeUnlock(transferId: string) {
     const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
     if (!transfer) throw new NotFoundException('Transfer not found');
     if (transfer.status !== 'LOCKED') {
       throw new BadRequestException(`Transfer status is ${transfer.status}, expected LOCKED`);
     }
 
+    // Unlock releases the ORIGINALLY locked tokens, so it executes on transfer.srcChain
+    // (in our BURN_UNLOCK convention, srcChain = the original chain, dstChain = the burn chain).
+    // The contract itself requires req.srcChainId === its own configured chainId.
     const provider   = this.getProvider(transfer.srcChain);
     const relayer    = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY!, provider);
     const bridgeAddr = this.getBridgeAddress(transfer.srcChain);
     const bridge     = new ethers.Contract(bridgeAddr, BRIDGE_V2_ABI, relayer);
 
-    const tokenId  = this.tokenIds[transfer.token];
-    const srcNonce = ethers.keccak256(
-      ethers.AbiCoder.defaultAbiCoder().encode(
-        ['uint256','uint256'],
-        [this.chainIds[transfer.dstChain], BigInt(transfer.nonce)]
-      )
-    );
+    const req = this.buildBridgeRequest({
+      token: transfer.token,
+      from: transfer.dstAddress,   // the burner's address, on the burn chain
+      to: transfer.srcAddress,     // recipient of the unlocked funds, on the original chain
+      amount: transfer.amount,
+      srcChain: transfer.srcChain, // must equal the chain we're executing on
+      dstChain: transfer.dstChain, // the burn chain
+      nonce: transfer.nonce, deadline: transfer.deadline,
+    });
+    const sigs = await this.signBridgeRequest(req);
 
-    const tx = await bridge.unlock(
-      tokenId, transfer.srcAddress,
-      ethers.parseUnits(transfer.amount, 6),
-      this.chainIds[transfer.dstChain],
-      srcNonce, signatures,
-    );
+    const tx      = await bridge.unlock(req, sigs);
     const receipt = await tx.wait();
 
     await this.prisma.bridgeTransfer.update({
@@ -257,7 +303,110 @@ export class BridgeService {
       data:  { status:'COMPLETED', dstTxHash:receipt.hash },
     });
 
+    this.logger.log(`Unlock executed: ${receipt.hash}`);
     return { txHash:receipt.hash, status:'COMPLETED' };
+  }
+
+  // ─── TRON completion ──────────────────────────────────────────────────────
+  //
+  // TronBridge.sol has a different interface than StablecoinBridgeV2.sol:
+  // string token symbols instead of bytes32 tokenIds, and a single opaque
+  // bytes32 srcNonce (that WE choose) instead of a struct the contract hashes
+  // itself. The message hash is keccak256(abi.encodePacked(token, recipient,
+  // amount, srcChain, srcNonce)) — matched exactly below via solidityPackedKeccak256.
+
+  private toTronEvmAddress(base58Address: string): string {
+    // TRON addresses are Ethereum-style 20-byte addresses wrapped in base58check
+    // with a leading 0x41 prefix. Solidity's `address` type only ever sees the
+    // raw 20 bytes, so the off-chain hash must use that form too — using the
+    // base58 string directly here would make the recovered signer never match
+    // an actual validator, and every mint/unlock would revert.
+    const hex41 = TronWeb.address.toHex(base58Address); // "41" + 40 hex chars
+    return '0x' + hex41.slice(2);
+  }
+
+  private async signTronRequest(
+    token: string, recipientBase58: string, amount: bigint, srcChain: string, srcNonce: string,
+  ): Promise<string[]> {
+    const recipientEvmStyle = this.toTronEvmAddress(recipientBase58);
+    const msgHash = ethers.solidityPackedKeccak256(
+      ['string', 'address', 'uint256', 'string', 'bytes32'],
+      [token, recipientEvmStyle, amount, srcChain, srcNonce],
+    );
+
+    const validatorKeys = [process.env.VALIDATOR_1_PRIVATE_KEY, process.env.VALIDATOR_2_PRIVATE_KEY]
+      .filter((k): k is string => !!k);
+    if (validatorKeys.length < 2) {
+      throw new Error('Need at least 2 validator private keys configured');
+    }
+    return Promise.all(
+      validatorKeys.map((key) => new ethers.Wallet(key).signMessage(ethers.getBytes(msgHash))),
+    );
+  }
+
+  private getTronBridge() {
+    const tronWeb = new TronWeb({
+      fullHost:   process.env.TRON_RPC!,
+      privateKey: process.env.RELAYER_TRON_PRIVATE_KEY!,
+    });
+    return tronWeb.contract().at(process.env.TRON_BRIDGE_V2_ADDRESS!);
+  }
+
+  async executeTronMint(transferId: string) {
+    const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
+    if (!transfer) throw new NotFoundException('Transfer not found');
+    if (transfer.status !== 'LOCKED') {
+      throw new BadRequestException(`Transfer status is ${transfer.status}, expected LOCKED`);
+    }
+
+    const amount   = ethers.parseUnits(transfer.amount, 6);
+    const srcNonce = ethers.keccak256(
+      ethers.solidityPacked(['string', 'uint256'], [transfer.srcChain, BigInt(transfer.nonce)]),
+    );
+    const sigs = await this.signTronRequest(transfer.token, transfer.dstAddress, amount, transfer.srcChain, srcNonce);
+
+    const bridge = await this.getTronBridge();
+    const txId = await bridge.mintTokens(
+      transfer.token, transfer.dstAddress, amount.toString(), transfer.srcChain, srcNonce, sigs,
+    ).send({ feeLimit: 200_000_000 });
+
+    await this.prisma.bridgeTransfer.update({
+      where: { id:transferId },
+      data:  { status:'COMPLETED', dstTxHash: txId },
+    });
+
+    this.logger.log(`TRON mint executed: ${txId}`);
+    return { txHash: txId, status:'COMPLETED' };
+  }
+
+  async executeTronUnlock(transferId: string) {
+    const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
+    if (!transfer) throw new NotFoundException('Transfer not found');
+    if (transfer.status !== 'LOCKED') {
+      throw new BadRequestException(`Transfer status is ${transfer.status}, expected LOCKED`);
+    }
+
+    const amount = ethers.parseUnits(transfer.amount, 6);
+    // "srcChain" plays the same role here as in TronBridge's mint() — the
+    // other chain involved in the operation. For unlock that's the chain the
+    // corresponding burn happened on (our DB's dstChain in BURN_UNLOCK rows).
+    const srcNonce = ethers.keccak256(
+      ethers.solidityPacked(['string', 'uint256'], [transfer.dstChain, BigInt(transfer.nonce)]),
+    );
+    const sigs = await this.signTronRequest(transfer.token, transfer.srcAddress, amount, transfer.dstChain, srcNonce);
+
+    const bridge = await this.getTronBridge();
+    const txId = await bridge.unlock(
+      transfer.token, transfer.srcAddress, amount.toString(), transfer.dstChain, srcNonce, sigs,
+    ).send({ feeLimit: 200_000_000 });
+
+    await this.prisma.bridgeTransfer.update({
+      where: { id:transferId },
+      data:  { status:'COMPLETED', dstTxHash: txId },
+    });
+
+    this.logger.log(`TRON unlock executed: ${txId}`);
+    return { txHash: txId, status:'COMPLETED' };
   }
 
   // ─── Get bridge status across chains ────────────────────────────────────────
@@ -293,9 +442,9 @@ export class BridgeService {
 
   getBridgeAddress(chain: string): string {
     const map: Record<string,string> = {
-      ethereum: process.env.ETH_BRIDGE_V2_ADDRESS   || process.env.ETH_BRIDGE_V2_ADDRESS!,
+      ethereum: process.env.ETH_BRIDGE_V2_ADDRESS!,
       bsc:      process.env.BSC_BRIDGE_V2_ADDRESS!,
-      polygon:  process.env.POLYGON_BRIDGE_V2_ADDRESS || process.env.POLYGON_BRIDGE_V2_ADDRESS!,
+      polygon:  process.env.POLYGON_BRIDGE_V2_ADDRESS!,
     };
     if (!map[chain]) throw new BadRequestException(`Bridge not configured for chain: ${chain}`);
     return map[chain];

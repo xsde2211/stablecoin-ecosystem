@@ -25,7 +25,7 @@ export class BridgeProcessor {
   @Process('lock-tokens')
   async handleLock(job: Job) {
     const { transferId, srcChain, dstChain, token, amount, dstAddress, walletAddress, nonce, deadline } = job.data;
-    this.logger.log(`Processing lock: ${transferId} on ${srcChain}`);
+    this.logger.log(`Processing lock: ${transferId} on ${srcChain} (attempt ${job.attemptsMade + 1}/${job.opts.attempts ?? 1})`);
 
     try {
       let srcTxHash: string;
@@ -40,16 +40,41 @@ export class BridgeProcessor {
         where: { id:transferId },
         data:  { status:'LOCKED', srcTxHash },
       });
-
-      // Cache lock event for listener service validation
       this.logger.log(`Lock successful: ${srcTxHash} for transfer ${transferId}`);
+
+      // Auto-complete the flow: mint on the destination chain now that the
+      // lock is confirmed. Kept as its own step/try-catch so a mint-side
+      // failure (e.g. genuinely rejected by validator signature checks)
+      // doesn't get confused with a lock-side failure in the logs or status.
+      try {
+        if (dstChain === 'tron') {
+          await this.bridgeSvc.executeTronMint(transferId);
+        } else {
+          await this.bridgeSvc.executeMint(transferId);
+        }
+        this.logger.log(`Mint auto-completed for transfer ${transferId}`);
+      } catch (mintErr: any) {
+        this.logger.error(`Mint failed for ${transferId}: ${mintErr.message}`);
+        await this.prisma.bridgeTransfer.update({
+          where: { id:transferId },
+          data:  { status:'FAILED' },
+        });
+      }
     } catch (err: any) {
-      this.logger.error(`Lock failed for ${transferId}:`, err.message);
-      await this.prisma.bridgeTransfer.update({
-        where: { id:transferId },
-        data:  { status:'FAILED' },
-      });
-      throw err; // Bull retries
+      const isFinalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+      this.logger.error(`Lock failed for ${transferId} (attempt ${job.attemptsMade + 1}): ${err.message}`);
+
+      if (isFinalAttempt) {
+        // Only mark FAILED once every retry has genuinely been exhausted —
+        // marking it on the first attempt was wrong, since Bull was still
+        // going to retry 2 more times regardless, and the transfer should
+        // stay PENDING (not flip to FAILED) while those retries are in flight.
+        await this.prisma.bridgeTransfer.update({
+          where: { id:transferId },
+          data:  { status:'FAILED' },
+        });
+      }
+      throw err; // Bull retries unless this was the final attempt
     }
   }
 
@@ -58,7 +83,7 @@ export class BridgeProcessor {
   @Process('burn-tokens')
   async handleBurn(job: Job) {
     const { transferId, chain, token, amount, srcChain, srcRecipient, walletAddress, nonce, deadline } = job.data;
-    this.logger.log(`Processing burn: ${transferId} on ${chain}`);
+    this.logger.log(`Processing burn: ${transferId} on ${chain} (attempt ${job.attemptsMade + 1}/${job.opts.attempts ?? 1})`);
 
     try {
       let burnTxHash: string;
@@ -73,14 +98,34 @@ export class BridgeProcessor {
         where: { id:transferId },
         data:  { status:'LOCKED', srcTxHash:burnTxHash },
       });
-
       this.logger.log(`Burn successful: ${burnTxHash} for transfer ${transferId}`);
+
+      // Auto-complete the flow: unlock on the original chain now that the
+      // burn is confirmed.
+      try {
+        if (srcChain === 'tron') {
+          await this.bridgeSvc.executeTronUnlock(transferId);
+        } else {
+          await this.bridgeSvc.executeUnlock(transferId);
+        }
+        this.logger.log(`Unlock auto-completed for transfer ${transferId}`);
+      } catch (unlockErr: any) {
+        this.logger.error(`Unlock failed for ${transferId}: ${unlockErr.message}`);
+        await this.prisma.bridgeTransfer.update({
+          where: { id:transferId },
+          data:  { status:'FAILED' },
+        });
+      }
     } catch (err: any) {
-      this.logger.error(`Burn failed for ${transferId}:`, err.message);
-      await this.prisma.bridgeTransfer.update({
-        where: { id:transferId },
-        data:  { status:'FAILED' },
-      });
+      const isFinalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+      this.logger.error(`Burn failed for ${transferId} (attempt ${job.attemptsMade + 1}): ${err.message}`);
+
+      if (isFinalAttempt) {
+        await this.prisma.bridgeTransfer.update({
+          where: { id:transferId },
+          data:  { status:'FAILED' },
+        });
+      }
       throw err;
     }
   }
