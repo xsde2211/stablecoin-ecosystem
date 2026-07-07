@@ -9,6 +9,8 @@ import UserDetail from './pages/UserDetail';
 import Transactions from './pages/Transactions';
 import BridgeTransfers from './pages/BridgeTransfers';
 import AuditLogs from './pages/AuditLogs';
+import MintBurn from './pages/MintBurn';
+import Roles from './pages/Roles';
 
 function ProtectedShell() {
   const { user, loading, logout } = useAuth();
@@ -58,6 +60,8 @@ export default function App() {
             <Route path="/users/:id" element={<UserDetail />} />
             <Route path="/transactions" element={<Transactions />} />
             <Route path="/bridge-transfers" element={<BridgeTransfers />} />
+            <Route path="/mint-burn" element={<MintBurn />} />
+            <Route path="/roles" element={<Roles />} />
             <Route path="/audit-logs" element={<AuditLogs />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

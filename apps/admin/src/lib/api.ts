@@ -146,4 +146,17 @@ export function getAuditLogs(params: { page?: number; limit?: number; userId?: s
   return request('GET', '/admin/audit-logs', { query: params });
 }
 
+// ─── Admin: System roles / signers ──────────────────────────────────────────
+export function getSystemRoles() {
+  return request('GET', '/admin/roles');
+}
+
+// ─── Stablecoin: Mint / Burn (testing only — bypasses treasury timelock) ────
+export function mintToken(body: { token: string; chain: string; toAddress: string; amount: string; reason: string }) {
+  return request('POST', '/stablecoin/mint', { body });
+}
+export function burnToken(body: { token: string; chain: string; fromAddress: string; amount: string; reason: string }) {
+  return request('POST', '/stablecoin/burn', { body });
+}
+
 export { ApiError };

@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import { ethers } from 'ethers';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService }  from '../redis/redis.service';
 import { UpdateRoleDto } from './dto/update-role.dto';
@@ -177,5 +178,94 @@ export class AdminService {
       this.prisma.auditLog.count({ where }),
     ]);
     return { data, total, page, limit, totalPages:Math.ceil(total/limit) };
+  }
+
+  // ─── System roles / signers — for the admin Mint/Burn testing page ────────────
+  //
+  // Surfaces WHO holds each on-chain role, by public address only. Never reads
+  // or returns a *_PRIVATE_KEY env var — only the *_ADDRESS companions that
+  // already exist for every role except MINTER, which has no address var of
+  // its own, so that one address is derived (never the key itself returned).
+
+  async getSystemRoles() {
+    const addr = (key: string): string | null => process.env[key] || null;
+
+    const deriveEvmAddress = (privateKeyEnvVar: string): string | null => {
+      const pk = process.env[privateKeyEnvVar];
+      if (!pk) return null;
+      try { return ethers.computeAddress(pk.startsWith('0x') ? pk : `0x${pk}`); }
+      catch { return null; }
+    };
+
+    const signersAndValidators = [1, 2, 3].map((n) => ({
+      label: `Signer / Validator ${n}`,
+      evm:   addr(`SIGNER_${n}_ADDRESS`),
+      tron:  addr(`TRON_SIGNER_${n}_ADDRESS`),
+      note:  'Bridge validator signature + treasury multi-sig signer (same person, both hats)',
+    }));
+
+    const oracleTeam = [1, 2].map((n) => ({
+      label: `Oracle ${n}`,
+      evm:   addr(`ORACLE_${n}_ADDRESS`),
+      tron:  addr(`TRON_ORACLE_${n}_ADDRESS`),
+      note:  'Submits live gold/silver price updates to OracleManager',
+    }));
+
+    // Human staff accounts (DB users), distinct from on-chain key-holder roles above
+    const staffUsers = await this.prisma.user.findMany({
+      where:   { role: { in: ['ADMIN', 'SUPER_ADMIN', 'COMPLIANCE'] } },
+      select:  { id: true, email: true, role: true, isActive: true, createdAt: true },
+      orderBy: { role: 'asc' },
+    });
+
+    return {
+      deployerGuardian: {
+        label: 'Deployer / Guardian',
+        evm:   addr('DEPLOYER_ADDRESS'),
+        tron:  addr('DEPLOYER_TRON_ADDRESS'),
+        note:  'Deploys contracts, holds DEFAULT_ADMIN_ROLE, can pause contracts (Guardian)',
+      },
+      minter: {
+        label: 'Minter',
+        evm:   addr('MINTER_ADDRESS') ?? deriveEvmAddress('MINTER_PRIVATE_KEY'),
+        note:  'Holds MINTER_ROLE — can mint tokens directly via /stablecoin/mint (testing only, bypasses treasury timelock)',
+      },
+      burner: {
+        label: 'Burner',
+        evm:   addr('SIGNER_1_ADDRESS'),
+        note:  'Holds BURNER_ROLE — reuses the Signer 1 key for /stablecoin/burn (testing only, bypasses treasury timelock)',
+      },
+      signersAndValidators,
+      relayer: {
+        label: 'Relayer',
+        evm:   addr('RELAYER_ADDRESS'),
+        tron:  addr('RELAYER_TRON_ADDRESS'),
+        note:  'Submits lock/mint/burn/unlock transactions on behalf of the bridge',
+      },
+      custodianAuditor: {
+        label: 'Custodian / Auditor',
+        evm:   addr('CUSTODIAN_ADDRESS'),
+        tron:  addr('TRON_CUSTODIAN_ADDRESS'),
+        note:  'ReserveVault roles — records and audits real-world asset backing',
+      },
+      oracleTeam,
+      complianceOnChain: {
+        blacklister: {
+          label: 'Blacklister',
+          evm:   addr('BLACKLISTER_ADDRESS'),
+          tron:  addr('TRON_BLACKLISTER_ADDRESS'),
+          note:  'Can blacklist addresses on any token contract',
+        },
+        freezer: {
+          label: 'Freezer',
+          evm:   addr('FREEZER_ADDRESS'),
+          tron:  addr('TRON_FREEZER_ADDRESS'),
+          note:  'Can freeze addresses on any token contract',
+        },
+      },
+      requiredValidators: process.env.REQUIRED_VALIDATORS ?? '2',
+      staffUsers,
+      generatedAt: new Date().toISOString(),
+    };
   }
 }

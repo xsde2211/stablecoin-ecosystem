@@ -100,4 +100,10 @@ export class AdminController {
     @Query('userId') userId?: string,
     @Query('action') action?: string,
   ) { return this.svc.getAuditLogs(page, limit, userId, action); }
+
+  // ─── System roles / signers ──────────────────────────────────────────────────
+
+  @Get('roles')
+  @ApiOperation({ summary:'Every on-chain role holder (by address only) + human staff accounts — for the Mint/Burn testing page' })
+  roles() { return this.svc.getSystemRoles(); }
 }
