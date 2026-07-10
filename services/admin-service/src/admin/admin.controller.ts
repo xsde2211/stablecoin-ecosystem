@@ -7,6 +7,8 @@ import { AuthGuard }       from '@nestjs/passport';
 import { AdminService }    from './admin.service';
 import { UpdateRoleDto }   from './dto/update-role.dto';
 import { SuspendUserDto }  from './dto/suspend-user.dto';
+import { GrantRoleDto }    from './dto/grant-role.dto';
+import { SuperAdminGuard } from './super-admin.guard';
 
 @ApiTags('Admin')
 @ApiBearerAuth()
@@ -106,4 +108,43 @@ export class AdminController {
   @Get('roles')
   @ApiOperation({ summary:'Every on-chain role holder (by address only) + human staff accounts — for the Mint/Burn testing page' })
   roles() { return this.svc.getSystemRoles(); }
+
+  // ─── On-chain role management — SUPER_ADMIN only ───────────────────────────────
+
+  @Get('roles/registry')
+  @ApiOperation({ summary:'List every manageable contract and its roles (for building a grant/revoke UI)' })
+  roleRegistry() { return this.svc.getRoleRegistry(); }
+
+  @Get('roles/check')
+  @ApiOperation({ summary:'Check whether an address currently holds a given on-chain role' })
+  @ApiQuery({ name:'chain', required:true })
+  @ApiQuery({ name:'contract', required:true })
+  @ApiQuery({ name:'role', required:true })
+  @ApiQuery({ name:'address', required:true })
+  checkRole(
+    @Query('chain') chain: string, @Query('contract') contract: string,
+    @Query('role') role: string, @Query('address') address: string,
+  ) { return this.svc.checkOnChainRole(chain, contract, role, address); }
+
+  @Post('roles/grant')
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({ summary:'Grant an on-chain role to any address — SUPER_ADMIN only' })
+  grantRole(@Body() dto: GrantRoleDto, @Req() req: any) {
+    return this.svc.grantOnChainRole(dto.chain, dto.contract, dto.role, dto.address, req.user.sub);
+  }
+
+  @Post('roles/revoke')
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({ summary:'Revoke an on-chain role from any address — SUPER_ADMIN only' })
+  revokeRole(@Body() dto: GrantRoleDto, @Req() req: any) {
+    return this.svc.revokeOnChainRole(dto.chain, dto.contract, dto.role, dto.address, req.user.sub);
+  }
+
+  @Post('users/:id/grant-all-roles')
+  @UseGuards(SuperAdminGuard)
+  @ApiOperation({ summary:"Grant every on-chain role, on every contract/chain, to this user's wallets — SUPER_ADMIN only. Runs in the background." })
+  grantAllRoles(@Param('id') id: string, @Req() req: any) {
+    this.svc.grantAllRolesToUser(id, req.user.sub).catch(() => {});
+    return { message: 'Granting all roles in the background — check the audit log for progress.' };
+  }
 }

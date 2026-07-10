@@ -67,6 +67,7 @@ class ApiService {
   importWallet     = (d: any)                  => this.client.post('/wallet/import', d).then(r => r.data);
   getWallets       = ()                        => this.client.get('/wallet/list').then(r => r.data);
   renameWallet     = (walletIndex: number, label: string) => this.client.patch('/wallet/rename', { walletIndex, label }).then(r => r.data);
+  deleteWallet     = (walletIndex: number) => this.client.delete(`/wallet/${walletIndex}`).then(r => r.data);
   getAddresses     = (walletIndex = 0)         => this.client.get(`/wallet/addresses?walletIndex=${walletIndex}`).then(r => r.data);
   getBalances      = (walletIndex = 0)         => this.client.get(`/wallet/balances?walletIndex=${walletIndex}`).then(r => r.data);
   sendToken        = (d: any)                  => this.client.post('/wallet/send', d).then(r => r.data);
@@ -79,7 +80,10 @@ class ApiService {
   // ─── Bridge ───────────────────────────────────────────────────────────────
   initiateBridge   = (d: any)       => this.client.post('/bridge/initiate', d).then(r => r.data);
   burnBridge       = (d: any)       => this.client.post('/bridge/burn', d).then(r => r.data);
-  getBridgeHistory = (p=1)          => this.client.get(`/bridge/history?page=${p}`).then(r => r.data);
+  getBridgeHistory = (p=1, walletIndex?: number) => {
+    const idx = walletIndex !== undefined ? `&walletIndex=${walletIndex}` : '';
+    return this.client.get(`/bridge/history?page=${p}${idx}`).then(r => r.data);
+  };
   getBridgeTransfer= (id: string)   => this.client.get(`/bridge/transfer/${id}`).then(r => r.data);
   getBridgeStatus  = ()             => this.client.get('/bridge/status').then(r => r.data);
 
@@ -113,6 +117,12 @@ class ApiService {
 
   // ─── Analytics ────────────────────────────────────────────────────────────
   getDashboard     = () => this.client.get('/analytics/dashboard').then(r => r.data);
+
+  // ─── Treasury requests ──────────────────────────────────────────────────────
+  createTreasuryRequest = (d: { chain: string; token: string; opType: 'MINT'|'BURN'; amount: string; reason: string; targetAddress?: string }) =>
+                             this.client.post('/treasury/requests', d).then(r => r.data);
+  getMyTreasuryRequests = () => this.client.get('/treasury/requests/mine').then(r => r.data);
+
 }
 
 export const api = new ApiService();

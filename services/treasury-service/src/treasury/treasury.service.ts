@@ -67,10 +67,128 @@ export class TreasuryService {
     private redis:  RedisService,
   ) {}
 
+  // ─── Treasury requests — human review step before an on-chain propose() ────
+  //
+  // A regular user submits "I want to mint 50 INRX, here's why" via the mobile
+  // app. This never touches the chain by itself. A SIGNER reviews it in the
+  // admin Treasury dashboard and either rejects it, or approves it — approving
+  // is what actually calls the real propose() below, starting the genuine
+  // 2-of-3-signature + 12h timelock flow. This table just tracks the human
+  // review step and links to the resulting on-chain operation.
+
+  async createRequest(userId: string, dto: {
+    chain: string; token: string; opType: string; amount: string; reason: string; targetAddress?: string;
+  }) {
+    let targetAddress = dto.targetAddress;
+    if (!targetAddress) {
+      const wallet = await this.prisma.wallet.findFirst({
+        where: { userId, chain: dto.chain, walletIndex: 0 },
+      });
+      if (!wallet) throw new BadRequestException(`You don't have a wallet on ${dto.chain} yet — create one first.`);
+      targetAddress = wallet.address;
+    }
+
+    const request = await this.prisma.treasuryRequest.create({
+      data: {
+        userId, chain: dto.chain, token: dto.token, opType: dto.opType,
+        amount: dto.amount, reason: dto.reason, targetAddress, status: 'PENDING_REVIEW',
+      },
+    });
+
+    this.logger.log(`Treasury request ${request.id} created by ${userId}: ${dto.opType} ${dto.amount} ${dto.token} on ${dto.chain}`);
+    return request;
+  }
+
+  async getMyRequests(userId: string) {
+    return this.prisma.treasuryRequest.findMany({
+      where: { userId }, orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async getRequests(status?: string) {
+    const where: any = {};
+    if (status) where.status = status;
+    return this.prisma.treasuryRequest.findMany({
+      where, orderBy: { createdAt: 'desc' },
+      include: { user: { select: { email: true } } },
+    });
+  }
+
+  async getRequestDetail(id: string) {
+    const request = await this.prisma.treasuryRequest.findUnique({
+      where: { id }, include: { user: { select: { email: true } } },
+    });
+    if (!request) throw new NotFoundException('Request not found');
+
+    if (request.status === 'PROPOSED' && request.treasuryOpId) {
+      // Merge in live on-chain state (signature count, timelock countdown, etc.)
+      const onChain = await this.getOperationDetails(request.chain, request.treasuryOpId).catch(() => null);
+      return { ...request, onChain };
+    }
+    return { ...request, onChain: null };
+  }
+
+  async approveRequest(id: string, reviewerId: string) {
+    const request = await this.prisma.treasuryRequest.findUnique({ where: { id } });
+    if (!request) throw new NotFoundException('Request not found');
+    if (request.status !== 'PENDING_REVIEW') {
+      throw new BadRequestException(`Request is already ${request.status.toLowerCase()}`);
+    }
+
+    const reviewer = await this.prisma.user.findUnique({
+      where: { id: reviewerId }, select: { role: true, signerIndex: true },
+    });
+    if (reviewer?.role !== 'SIGNER' && reviewer?.role !== 'ADMIN' && reviewer?.role !== 'SUPER_ADMIN') {
+      throw new BadRequestException('Only a Signer can approve a treasury request');
+    }
+    const signerIndex = (reviewer.signerIndex as 1 | 2 | 3 | null) ?? 1;
+
+    const proposed = await this.propose(
+      {
+        chain: request.chain, token: request.token, opType: request.opType,
+        amount: request.amount, reason: request.reason, targetAddress: request.targetAddress ?? undefined,
+      },
+      reviewerId,
+      signerIndex,
+    );
+
+    const updated = await this.prisma.treasuryRequest.update({
+      where: { id },
+      data: {
+        status: 'PROPOSED', treasuryOpId: proposed.opId,
+        reviewedBy: reviewerId, reviewedAt: new Date(),
+      },
+    });
+
+    return { ...updated, onChainResult: proposed };
+  }
+
+  async rejectRequest(id: string, reason: string, reviewerId: string) {
+    const request = await this.prisma.treasuryRequest.findUnique({ where: { id } });
+    if (!request) throw new NotFoundException('Request not found');
+    if (request.status !== 'PENDING_REVIEW') {
+      throw new BadRequestException(`Request is already ${request.status.toLowerCase()}`);
+    }
+
+    const updated = await this.prisma.treasuryRequest.update({
+      where: { id },
+      data: { status: 'REJECTED', rejectedReason: reason, reviewedBy: reviewerId, reviewedAt: new Date() },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId: reviewerId, action: 'TREASURY_REQUEST_REJECT', entityType: 'TreasuryRequest', entityId: id,
+        payload: { reason },
+      },
+    });
+
+    return updated;
+  }
+
   // ─── Propose operation ──────────────────────────────────────────────────────
 
-  async propose(dto: ProposeDto, proposedBy: string) {
-    const { contract, provider } = this.getContract(dto.chain, 'signer1');
+  async propose(dto: ProposeDto, proposedBy: string, signerIndex: 1 | 2 | 3 = 1) {
+    const { contract, provider } = this.getContract(dto.chain, `signer${signerIndex}`);
 
     const tokenId   = TOKEN_IDS[dto.token];
     const opTypeNum = OP_TYPES[dto.opType];
@@ -322,7 +440,7 @@ export class TreasuryService {
     const map: Record<string,string> = {
       ethereum: process.env.ETH_TREASURY_TIMELOCK_ADDRESS!,
       bsc:      process.env.BSC_TREASURY_TIMELOCK_ADDRESS!,
-      polygon:  process.env.POLYGONAMOY_TREASURY_TIMELOCK_ADDRESS!,
+      polygon:  process.env.POLYGON_TREASURY_TIMELOCK_ADDRESS!,
     };
     if (!map[chain]) throw new BadRequestException(`Treasury not configured for chain: ${chain}`);
     return map[chain];

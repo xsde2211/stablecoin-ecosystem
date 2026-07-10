@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Share,
 } from 'react-native';
@@ -12,6 +12,7 @@ import { Skeleton }     from '../../components/ui/Skeleton';
 import { TokenIcon }    from '../../components/ui/TokenIcon';
 import { ChainBadge }   from '../../components/ui/ChainBadge';
 import { colors, typography, spacing, radius, shadow } from '../../theme';
+import { useFocusEffect } from '@react-navigation/native';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchAddresses } from '../../store/slices/walletSlice';
 import type { AppDispatch, RootState } from '../../store';
@@ -24,13 +25,20 @@ const CHAIN_LABEL: Record<string, string> = {
 
 export default function ReceiveScreen() {
   const dispatch = useDispatch<AppDispatch>();
-  const { addresses, loading } = useSelector((s: RootState) => s.wallet);
+  const { addresses, loading, activeWalletIndex } = useSelector((s: RootState) => s.wallet);
 
   const [chain, setChain]   = useState('tron');
   const [token, setToken]   = useState('INRX');
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => { dispatch(fetchAddresses()); }, []);
+  // Refetch whenever the screen gains focus AND whenever the active wallet
+  // changes (e.g. switched in WalletManagerScreen), so this always shows the
+  // currently-active wallet's addresses instead of a stale/default one.
+  useFocusEffect(
+    useCallback(() => {
+      dispatch(fetchAddresses(activeWalletIndex));
+    }, [dispatch, activeWalletIndex])
+  );
 
   // walletSlice addresses: Record<chain,address> | array of {chain,address}
   const addrMap: Record<string, string> = {};

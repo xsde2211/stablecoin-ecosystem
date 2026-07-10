@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Patch, Body, Param,
+  Controller, Get, Post, Patch, Delete, Body, Param,
   Req, UseGuards, Query, ParseIntPipe,
   DefaultValuePipe, Optional,
 } from '@nestjs/common';
@@ -10,8 +10,6 @@ import { AuthGuard }     from '@nestjs/passport';
 import { WalletService } from './wallet.service';
 import { SendTokenDto }  from './dto/send-token.dto';
 import { ImportWalletDto } from './dto/import-wallet.dto';
-
-// ── Inline DTOs (avoids creating extra files) ─────────────────────────────────
 
 class CreateWalletDto {
   @ApiProperty({ example: 'Trading Wallet', required: false })
@@ -36,8 +34,6 @@ class SendTokenWithIndexDto extends SendTokenDto {
   walletIndex?: number;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 @ApiTags('Wallet')
 @ApiBearerAuth()
 @UseGuards(AuthGuard('jwt'))
@@ -45,35 +41,37 @@ class SendTokenWithIndexDto extends SendTokenDto {
 export class WalletController {
   constructor(private wallet: WalletService) {}
 
-  // ── Create new wallet (supports multiple wallets per user) ───────────────────
   @Post('create')
   @ApiOperation({ summary: 'Create a new wallet — returns mnemonic ONCE. Supports multiple wallets per user.' })
   create(@Req() req: any, @Body() dto: CreateWalletDto) {
     return this.wallet.createWallet(req.user.sub, dto.label);
   }
 
-  // ── Import wallet from seed phrase ──────────────────────────────────────────
   @Post('import')
   @ApiOperation({ summary: 'Import wallet from existing 12/24-word seed phrase' })
   import(@Req() req: any, @Body() dto: ImportWalletDto) {
     return this.wallet.importWallet(req.user.sub, dto.mnemonic);
   }
 
-  // ── List all wallets ─────────────────────────────────────────────────────────
   @Get('list')
   @ApiOperation({ summary: 'Get all wallets with their addresses grouped by walletIndex' })
   list(@Req() req: any) {
     return this.wallet.getWallets(req.user.sub);
   }
 
-  // ── Rename a wallet ──────────────────────────────────────────────────────────
   @Patch('rename')
   @ApiOperation({ summary: 'Rename a wallet by walletIndex' })
   rename(@Req() req: any, @Body() dto: RenameWalletDto) {
     return this.wallet.renameWallet(req.user.sub, dto.walletIndex, dto.label);
   }
 
-  // ── Get addresses — supports walletIndex query param ────────────────────────
+  // ── Delete a wallet (soft delete — refuses to delete your last wallet) ──────
+  @Delete(':walletIndex')
+  @ApiOperation({ summary: 'Delete a wallet by walletIndex. Refuses to delete your only remaining wallet.' })
+  remove(@Req() req: any, @Param('walletIndex', ParseIntPipe) walletIndex: number) {
+    return this.wallet.deleteWallet(req.user.sub, walletIndex);
+  }
+
   @Get('addresses')
   @ApiOperation({ summary: 'Get all wallet addresses across all chains for a given walletIndex (default: 0)' })
   @ApiQuery({ name: 'walletIndex', required: false, type: Number })
@@ -84,7 +82,6 @@ export class WalletController {
     return this.wallet.getAddresses(req.user.sub, walletIndex);
   }
 
-  // ── Get balances — supports walletIndex query param ──────────────────────────
   @Get('balances')
   @ApiOperation({ summary: 'Get token balances for a given walletIndex (default: 0)' })
   @ApiQuery({ name: 'walletIndex', required: false, type: Number })
@@ -95,14 +92,12 @@ export class WalletController {
     return this.wallet.getAllBalances(req.user.sub, walletIndex);
   }
 
-  // ── Send tokens — supports walletIndex in body ───────────────────────────────
   @Post('send')
   @ApiOperation({ summary: 'Send tokens from a specific wallet (walletIndex in body, default: 0)' })
   send(@Req() req: any, @Body() dto: SendTokenWithIndexDto) {
     return this.wallet.sendToken(req.user.sub, dto);
   }
 
-  // ── Transaction history — supports walletIndex filter ───────────────────────
   @Get('transactions')
   @ApiOperation({ summary: 'Get transaction history. Pass walletIndex to filter by wallet (omit for all wallets).' })
   @ApiQuery({ name: 'page',        required: false, type: Number })
@@ -118,7 +113,6 @@ export class WalletController {
     return this.wallet.getTransactions(req.user.sub, page, limit, idx);
   }
 
-  // ── Get single transaction ───────────────────────────────────────────────────
   @Get('transactions/:id')
   @ApiOperation({ summary: 'Get a single transaction by ID' })
   getTransaction(@Req() req: any, @Param('id') id: string) {

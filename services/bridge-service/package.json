@@ -3,6 +3,7 @@
   "version": "2.0.0",
   "scripts": { "build":"nest build", "start":"node dist/main", "dev":"nest start --watch" },
   "dependencies": {
+    "@ecosystem/crypto":         "workspace:*",
     "@nestjs/bull":             "^10.0.0",
     "@nestjs/common":           "^10.0.0",
     "@nestjs/config":           "^3.3.0",

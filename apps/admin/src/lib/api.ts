@@ -151,12 +151,52 @@ export function getSystemRoles() {
   return request('GET', '/admin/roles');
 }
 
+// ─── Admin: On-chain role management — SUPER_ADMIN only ────────────────────
+export function getRoleRegistry() {
+  return request('GET', '/admin/roles/registry');
+}
+export function checkRole(params: { chain: string; contract: string; role: string; address: string }) {
+  return request('GET', '/admin/roles/check', { query: params });
+}
+export function grantRole(body: { chain: string; contract: string; role: string; address: string }) {
+  return request('POST', '/admin/roles/grant', { body });
+}
+export function revokeRole(body: { chain: string; contract: string; role: string; address: string }) {
+  return request('POST', '/admin/roles/revoke', { body });
+}
+export function grantAllRoles(userId: string) {
+  return request('POST', `/admin/users/${userId}/grant-all-roles`);
+}
+
 // ─── Stablecoin: Mint / Burn (testing only — bypasses treasury timelock) ────
 export function mintToken(body: { token: string; chain: string; toAddress: string; amount: string; reason: string }) {
   return request('POST', '/stablecoin/mint', { body });
 }
 export function burnToken(body: { token: string; chain: string; fromAddress: string; amount: string; reason: string }) {
   return request('POST', '/stablecoin/burn', { body });
+}
+
+// ─── Treasury ────────────────────────────────────────────────────────────
+export function getTreasuryRequests(status?: string) {
+  return request('GET', '/treasury/requests', { query: status ? { status } : undefined });
+}
+export function getTreasuryRequestDetail(id: string) {
+  return request('GET', `/treasury/requests/${id}`);
+}
+export function approveTreasuryRequest(id: string) {
+  return request('POST', `/treasury/requests/${id}/approve`);
+}
+export function rejectTreasuryRequest(id: string, reason: string) {
+  return request('POST', `/treasury/requests/${id}/reject`, { body: { reason } });
+}
+export function signTreasuryOp(body: { chain: string; opId: string }, signerIndex: number) {
+  return request('POST', '/treasury/sign', { query: { signerIndex }, body });
+}
+export function executeTreasuryOp(chain: string, opId: string) {
+  return request('POST', `/treasury/execute/${chain}/${opId}`);
+}
+export function cancelTreasuryOp(chain: string, opId: string, reason: string) {
+  return request('POST', `/treasury/cancel/${chain}/${opId}`, { body: { reason } });
 }
 
 export { ApiError };

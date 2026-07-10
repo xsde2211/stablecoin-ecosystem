@@ -1,6 +1,7 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth, isAdminRole } from './lib/auth';
 import { Layout } from './components/Layout';
+import { TreasuryLayout } from './components/TreasuryLayout';
 import { FullPageSpinner } from './components/ui';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -11,9 +12,12 @@ import BridgeTransfers from './pages/BridgeTransfers';
 import AuditLogs from './pages/AuditLogs';
 import MintBurn from './pages/MintBurn';
 import Roles from './pages/Roles';
+import RoleManagement from './pages/RoleManagement';
+import TreasuryDashboard from './pages/TreasuryDashboard';
 
 function ProtectedShell() {
-  const { user, loading, logout } = useAuth();
+  const { user, loading, logout, isTreasuryTeam } = useAuth();
+  const location = useLocation();
 
   if (loading) return <FullPageSpinner />;
   if (!user) return <Navigate to="/login" replace />;
@@ -25,8 +29,7 @@ function ProtectedShell() {
           This account can't access the admin console
         </p>
         <p className="max-w-sm text-sm text-slate-400">
-          Your role is <span className="font-medium text-slate-300">{user.role}</span>. Only Admin, Super Admin,
-          and Compliance accounts can sign in here.
+          Your role is <span className="font-medium text-slate-300">{user.role}</span>.
         </p>
         <button
           onClick={() => { logout(); window.location.href = '/login'; }}
@@ -36,6 +39,15 @@ function ProtectedShell() {
         </button>
       </div>
     );
+  }
+
+  // Treasury team (SIGNER/GUARDIAN) gets a completely different, much smaller
+  // shell — and can only ever land on /treasury, regardless of what URL they
+  // try. Everyone else (ADMIN/SUPER_ADMIN/COMPLIANCE) gets the full admin
+  // Layout, which also includes a Treasury nav link for oversight.
+  if (isTreasuryTeam) {
+    if (location.pathname !== '/treasury') return <Navigate to="/treasury" replace />;
+    return <TreasuryLayout />;
   }
 
   return <Layout />;
@@ -60,8 +72,10 @@ export default function App() {
             <Route path="/users/:id" element={<UserDetail />} />
             <Route path="/transactions" element={<Transactions />} />
             <Route path="/bridge-transfers" element={<BridgeTransfers />} />
+            <Route path="/treasury" element={<TreasuryDashboard />} />
             <Route path="/mint-burn" element={<MintBurn />} />
             <Route path="/roles" element={<Roles />} />
+            <Route path="/role-management" element={<RoleManagement />} />
             <Route path="/audit-logs" element={<AuditLogs />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

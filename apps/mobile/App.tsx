@@ -10,7 +10,7 @@ import { store }              from './src/store';
 import type { AppDispatch, RootState } from './src/store';
 import AppNavigator           from './src/navigation/AppNavigator';
 import { hydrateAuth }        from './src/store/slices/authSlice';
-import { fetchAddresses }     from './src/store/slices/walletSlice';
+import { fetchAddresses, initActiveWalletIndex } from './src/store/slices/walletSlice';
 
 // Inner component so it can access the Redux store via hooks
 function AppInner() {
@@ -25,9 +25,15 @@ function AppInner() {
   // Once authenticated, immediately check whether the wallet already exists
   // on the backend. If fetchAddresses returns data, walletSlice will set
   // walletReady = true and AppNavigator will route to Dashboard (not WalletSetup).
+  //
+  // IMPORTANT: restore the persisted "active wallet index" FIRST and wait for
+  // it, otherwise fetchAddresses() would run against the default (walletIndex
+  // 0) before we know the user last had wallet 2/3/etc. active.
   useEffect(() => {
     if (isAuthenticated) {
-      dispatch(fetchAddresses());
+      dispatch(initActiveWalletIndex()).then(() => {
+        dispatch(fetchAddresses());
+      });
     }
   }, [isAuthenticated]);
 

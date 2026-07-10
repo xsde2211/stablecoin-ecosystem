@@ -56,6 +56,26 @@ export class BridgeService {
     @InjectQueue('bridge') private bridgeQueue: Queue,
   ) {}
 
+  // ─── Mode ────────────────────────────────────────────────────────────────
+  //
+  // MODE=TESTING   → the relayer signs with the validator private keys AND
+  //                  executes mint/unlock itself, right after a successful
+  //                  lock/burn — no human validator dashboard involved. This
+  //                  is for local/dev testing only: it works because all the
+  //                  validator + relayer private keys already live in this
+  //                  service's own .env.
+  // MODE=PRODUCTION (default, fail-safe if MODE is unset/misspelled) → after
+  //                  a lock/burn confirms, the transfer stays LOCKED. The
+  //                  validator dashboard (separate, in progress) is
+  //                  responsible for real validators reviewing and signing
+  //                  the request, and for eventually triggering mint/unlock
+  //                  with those real signatures. This service does NOT
+  //                  auto-sign or auto-execute in this mode.
+
+  isTestingMode(): boolean {
+    return (process.env.MODE ?? 'PRODUCTION').trim().toUpperCase() === 'TESTING';
+  }
+
   // ─── Initiate (LOCK flow: srcChain → dstChain) ─────────────────────────────
 
   async initiate(userId: string, dto: InitiateBridgeDto) {
@@ -63,12 +83,16 @@ export class BridgeService {
       throw new BadRequestException('Source and destination chains must differ');
     }
 
-    // Get user wallet address for srcChain
+    // Get user wallet address for srcChain — use whichever wallet the
+    // request specifies (default: 0). Previously this was hardcoded to
+    // walletIndex 0, so bridging always used wallet 1 no matter which
+    // wallet was selected in the app.
+    const walletIndex = dto.walletIndex ?? 0;
     const wallet = await this.prisma.wallet.findFirst({
-      where: { userId, chain: dto.srcChain, walletIndex: 0 },
+      where: { userId, chain: dto.srcChain, walletIndex, isActive: true },
     });
     if (!wallet) {
-      throw new BadRequestException(`No wallet found for chain: ${dto.srcChain}. Create a wallet first.`);
+      throw new BadRequestException(`No wallet found for chain: ${dto.srcChain} (walletIndex ${walletIndex}). Create a wallet first.`);
     }
 
     const nonce    = Date.now();
@@ -77,6 +101,7 @@ export class BridgeService {
     const transfer = await this.prisma.bridgeTransfer.create({
       data: {
         userId,
+        walletId:   wallet.id, // ← was previously never set, so history/joins couldn't tell which wallet a transfer belonged to
         srcChain:   dto.srcChain,
         dstChain:   dto.dstChain,
         srcAddress: wallet.address,
@@ -107,17 +132,18 @@ export class BridgeService {
       { attempts:3, backoff:{ type:'exponential', delay:5000 } },
     );
 
-    this.logger.log(`Bridge initiated: ${transfer.id} — ${dto.srcChain}→${dto.dstChain}`);
+    this.logger.log(`Bridge initiated: ${transfer.id} — ${dto.srcChain}→${dto.dstChain} (MODE=${this.isTestingMode() ? 'TESTING' : 'PRODUCTION'})`);
     return transfer;
   }
 
   // ─── Burn (BURN flow: user burns on dstChain to return to srcChain) ─────────
 
   async initiateBurn(userId: string, dto: BurnBridgeDto) {
+    const walletIndex = dto.walletIndex ?? 0;
     const wallet = await this.prisma.wallet.findFirst({
-      where: { userId, chain: dto.chain, walletIndex: 0 },
+      where: { userId, chain: dto.chain, walletIndex, isActive: true },
     });
-    if (!wallet) throw new BadRequestException(`No wallet for chain: ${dto.chain}`);
+    if (!wallet) throw new BadRequestException(`No wallet for chain: ${dto.chain} (walletIndex ${walletIndex})`);
 
     const nonce    = Date.now();
     const deadline = Math.floor(Date.now() / 1000) + 3600;
@@ -125,6 +151,7 @@ export class BridgeService {
     const transfer = await this.prisma.bridgeTransfer.create({
       data: {
         userId,
+        walletId:   wallet.id,
         srcChain:   dto.srcChain,
         dstChain:   dto.chain,
         srcAddress: dto.srcRecipient,
@@ -155,7 +182,7 @@ export class BridgeService {
       { attempts:3, backoff:{ type:'exponential', delay:5000 } },
     );
 
-    this.logger.log(`Burn initiated: ${transfer.id} — ${dto.chain}→${dto.srcChain}`);
+    this.logger.log(`Burn initiated: ${transfer.id} — ${dto.chain}→${dto.srcChain} (MODE=${this.isTestingMode() ? 'TESTING' : 'PRODUCTION'})`);
     return transfer;
   }
 
@@ -172,19 +199,53 @@ export class BridgeService {
 
   // ─── Get history ────────────────────────────────────────────────────────────
 
-  async getUserTransfers(userId: string, page = 1, limit = 20) {
+  async getUserTransfers(userId: string, page = 1, limit = 20, walletIndex?: number) {
     const skip = (page - 1) * limit;
+    // Pass walletIndex to see only the active wallet's bridge history;
+    // omit it (as before) to see all wallets' transfers.
+    const where = {
+      userId,
+      ...(walletIndex !== undefined ? { wallet: { walletIndex } } : {}),
+    };
     const [data, total] = await Promise.all([
       this.prisma.bridgeTransfer.findMany({
-        where:   { userId },
+        where,
         orderBy: { createdAt:'desc' },
         skip,
         take:    limit,
         include: { validatorSignatures: { select: { validatorAddr: true, signedAt: true } } },
       }),
-      this.prisma.bridgeTransfer.count({ where:{ userId } }),
+      this.prisma.bridgeTransfer.count({ where }),
     ]);
     return { data, total, page, limit, totalPages: Math.ceil(total/limit) };
+  }
+
+  // ─── Cross-chain address normalization ─────────────────────────────────────
+  //
+  // EVM bridge contracts store recipient/sender addresses as Solidity
+  // `address` (a plain 20-byte value) — that's fine when the other chain is
+  // also EVM, but a raw TRON base58 string ("T...") is NOT valid hex. When
+  // ethers tries to ABI-encode a non-hex string as `address`, it assumes it
+  // might be an ENS name and calls provider.resolveName() — which throws
+  // "UNCONFIGURED_NAME" on any network without an ENS registry (which is
+  // every testnet here). That's exactly what was breaking every
+  // ethereum→tron (or tron-involved) bridge transfer.
+  //
+  // TRON addresses are really just a 20-byte EVM-style address wrapped in
+  // base58check with a leading 0x41 prefix — so whenever the chain on the
+  // "EVM side" of an address is actually tron, convert it to that raw
+  // 20-byte hex form before it ever touches an EVM `address` parameter
+  // (both for the actual on-chain call AND for computing the signature
+  // hash — they must use the identical encoded value or signatures won't
+  // recover to the right validator address on-chain).
+
+  toTronEvmAddress(base58Address: string): string {
+    const hex41 = TronWeb.address.toHex(base58Address); // "41" + 40 hex chars
+    return '0x' + hex41.slice(2);
+  }
+
+  normalizeAddressForChain(address: string, chain: string): string {
+    return chain === 'tron' ? this.toTronEvmAddress(address) : address;
   }
 
   // ─── Signing — matches contract's _hashRequest() + ECDSA.toEthSignedMessageHash exactly ───
@@ -194,6 +255,10 @@ export class BridgeService {
   // ethers' wallet.signMessage() applies the identical "\x19Ethereum Signed Message:\n32"
   // prefix that toEthSignedMessageHash does, so signing the raw inner hash here
   // reproduces exactly what hash.recover(sig) expects on-chain.
+  //
+  // NOTE: params.from / params.to MUST already be normalized via
+  // normalizeAddressForChain() by the caller if the corresponding chain is
+  // tron — this method has no way to know which side (if any) is tron.
 
   private buildBridgeRequest(params: {
     token: string; from: string; to: string; amount: string;
@@ -211,7 +276,15 @@ export class BridgeService {
     };
   }
 
-  private async signBridgeRequest(req: ReturnType<BridgeService['buildBridgeRequest']>): Promise<string[]> {
+  // TESTING-mode only: signs with the validator private keys configured in
+  // THIS service's own .env, and also returns each signer's address so we
+  // can persist real ValidatorSignature rows (previously this data was
+  // generated and used to submit the mint/unlock tx but never saved
+  // anywhere — the mobile app's "N / 2 validator signatures" display was
+  // always stuck at 0/2 as a result).
+  private async signBridgeRequest(
+    req: ReturnType<BridgeService['buildBridgeRequest']>,
+  ): Promise<{ signatures: string[]; signers: string[] }> {
     const innerHash = ethers.keccak256(
       ethers.AbiCoder.defaultAbiCoder().encode(
         ['bytes32', 'address', 'address', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256'],
@@ -219,9 +292,14 @@ export class BridgeService {
       ),
     );
 
-    // REQUIRED_VALIDATORS=2 on the deployed contracts — use the first 2 of the
-    // 3 configured validator keys. All 3 are independently valid signers on-chain;
+    // REQUIRED_VALIDATORS=2 on the deployed EVM contracts — use the first 2 of the
+    // 3 configured EVM validator keys. All 3 are independently valid signers on-chain;
     // any 2-of-3 combination satisfies the threshold.
+    // NOTE: these are the EVM-side validator keys (VALIDATOR_1/2/3_PRIVATE_KEY),
+    // registered via addValidator() on the EVM StablecoinBridgeV2 contracts.
+    // TRON has its OWN separately-registered validator set — see
+    // signTronRequest() below, which correctly uses TRON_VALIDATOR_1/2/3_PRIVATE_KEY
+    // instead. Mixing these up is exactly what caused "Bridge: invalid validator".
     const validatorKeys = [process.env.VALIDATOR_1_PRIVATE_KEY, process.env.VALIDATOR_2_PRIVATE_KEY]
       .filter((k): k is string => !!k);
 
@@ -229,14 +307,34 @@ export class BridgeService {
       throw new Error('Need at least 2 validator private keys configured (VALIDATOR_1_PRIVATE_KEY, VALIDATOR_2_PRIVATE_KEY)');
     }
 
-    return Promise.all(
-      validatorKeys.map((key) => new ethers.Wallet(key).signMessage(ethers.getBytes(innerHash))),
-    );
+    const wallets    = validatorKeys.map((key) => new ethers.Wallet(key));
+    const signatures = await Promise.all(wallets.map((w) => w.signMessage(ethers.getBytes(innerHash))));
+    const signers    = wallets.map((w) => w.address);
+    return { signatures, signers };
   }
 
-  // ─── Relayer: execute mint (called automatically once a lock is confirmed) ───
+  private async recordValidatorSignatures(transferId: string, signers: string[], signatures: string[]) {
+    await this.prisma.validatorSignature.createMany({
+      data: signers.map((validatorAddr, i) => ({ transferId, validatorAddr, signature: signatures[i] })),
+      skipDuplicates: true,
+    });
+  }
+
+  private assertTestingMode(action: string) {
+    if (!this.isTestingMode()) {
+      throw new BadRequestException(
+        `${action} is only available with MODE=TESTING. In production, a transfer stays LOCKED until ` +
+        `the validator dashboard collects real validator signatures and submits them — this service does ` +
+        `not self-sign or auto-execute in production.`,
+      );
+    }
+  }
+
+  // ─── Relayer: execute mint (TESTING mode: called automatically once a lock is confirmed) ───
 
   async executeMint(transferId: string) {
+    this.assertTestingMode('executeMint');
+
     const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
     if (!transfer) throw new NotFoundException('Transfer not found');
     if (transfer.status !== 'LOCKED') {
@@ -249,13 +347,20 @@ export class BridgeService {
     const bridge      = new ethers.Contract(bridgeAddr, BRIDGE_V2_ABI, relayer);
 
     const req = this.buildBridgeRequest({
-      token: transfer.token, from: transfer.srcAddress, to: transfer.dstAddress,
+      token: transfer.token,
+      // srcAddress lives on transfer.srcChain, which could be tron (e.g. a
+      // tron→ethereum bridge) — normalize before it touches an `address` field.
+      from: this.normalizeAddressForChain(transfer.srcAddress, transfer.srcChain),
+      to:   transfer.dstAddress, // dstChain is guaranteed EVM here (tron dst goes through executeTronMint instead)
       amount: transfer.amount, srcChain: transfer.srcChain, dstChain: transfer.dstChain,
       nonce: transfer.nonce, deadline: transfer.deadline,
     });
-    const sigs = await this.signBridgeRequest(req);
+    const { signatures, signers } = await this.signBridgeRequest(req);
 
-    const tx      = await bridge.mint(req, sigs);
+    await this.recordValidatorSignatures(transferId, signers, signatures);
+    await this.prisma.bridgeTransfer.update({ where:{ id:transferId }, data:{ status:'SIGNATURES_COLLECTED' } });
+
+    const tx      = await bridge.mint(req, signatures);
     const receipt = await tx.wait();
 
     await this.prisma.bridgeTransfer.update({
@@ -263,13 +368,15 @@ export class BridgeService {
       data:  { status:'COMPLETED', dstTxHash:receipt.hash },
     });
 
-    this.logger.log(`Mint executed: ${receipt.hash}`);
+    this.logger.log(`[TESTING] Mint executed: ${receipt.hash}`);
     return { txHash:receipt.hash, status:'COMPLETED' };
   }
 
-  // ─── Relayer: execute unlock (called automatically once a burn is confirmed) ──
+  // ─── Relayer: execute unlock (TESTING mode: called automatically once a burn is confirmed) ──
 
   async executeUnlock(transferId: string) {
+    this.assertTestingMode('executeUnlock');
+
     const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
     if (!transfer) throw new NotFoundException('Transfer not found');
     if (transfer.status !== 'LOCKED') {
@@ -286,16 +393,21 @@ export class BridgeService {
 
     const req = this.buildBridgeRequest({
       token: transfer.token,
-      from: transfer.dstAddress,   // the burner's address, on the burn chain
-      to: transfer.srcAddress,     // recipient of the unlocked funds, on the original chain
+      // dstAddress here is the burner's address on the burn chain
+      // (transfer.dstChain in BURN_UNLOCK convention), which could be tron.
+      from: this.normalizeAddressForChain(transfer.dstAddress, transfer.dstChain),
+      to: transfer.srcAddress,     // recipient of the unlocked funds, on the original chain — guaranteed EVM here
       amount: transfer.amount,
       srcChain: transfer.srcChain, // must equal the chain we're executing on
       dstChain: transfer.dstChain, // the burn chain
       nonce: transfer.nonce, deadline: transfer.deadline,
     });
-    const sigs = await this.signBridgeRequest(req);
+    const { signatures, signers } = await this.signBridgeRequest(req);
 
-    const tx      = await bridge.unlock(req, sigs);
+    await this.recordValidatorSignatures(transferId, signers, signatures);
+    await this.prisma.bridgeTransfer.update({ where:{ id:transferId }, data:{ status:'SIGNATURES_COLLECTED' } });
+
+    const tx      = await bridge.unlock(req, signatures);
     const receipt = await tx.wait();
 
     await this.prisma.bridgeTransfer.update({
@@ -303,7 +415,7 @@ export class BridgeService {
       data:  { status:'COMPLETED', dstTxHash:receipt.hash },
     });
 
-    this.logger.log(`Unlock executed: ${receipt.hash}`);
+    this.logger.log(`[TESTING] Unlock executed: ${receipt.hash}`);
     return { txHash:receipt.hash, status:'COMPLETED' };
   }
 
@@ -315,44 +427,112 @@ export class BridgeService {
   // itself. The message hash is keccak256(abi.encodePacked(token, recipient,
   // amount, srcChain, srcNonce)) — matched exactly below via solidityPackedKeccak256.
 
-  private toTronEvmAddress(base58Address: string): string {
-    // TRON addresses are Ethereum-style 20-byte addresses wrapped in base58check
-    // with a leading 0x41 prefix. Solidity's `address` type only ever sees the
-    // raw 20 bytes, so the off-chain hash must use that form too — using the
-    // base58 string directly here would make the recovered signer never match
-    // an actual validator, and every mint/unlock would revert.
-    const hex41 = TronWeb.address.toHex(base58Address); // "41" + 40 hex chars
-    return '0x' + hex41.slice(2);
-  }
-
   private async signTronRequest(
     token: string, recipientBase58: string, amount: bigint, srcChain: string, srcNonce: string,
-  ): Promise<string[]> {
+  ): Promise<{ signatures: string[]; signers: string[] }> {
     const recipientEvmStyle = this.toTronEvmAddress(recipientBase58);
     const msgHash = ethers.solidityPackedKeccak256(
       ['string', 'address', 'uint256', 'string', 'bytes32'],
       [token, recipientEvmStyle, amount, srcChain, srcNonce],
     );
 
-    const validatorKeys = [process.env.VALIDATOR_1_PRIVATE_KEY, process.env.VALIDATOR_2_PRIVATE_KEY]
+    // THE FIX: this was signing with VALIDATOR_1/2_PRIVATE_KEY — the EVM
+    // validator keys — which are a completely different, separately
+    // registered validator set from the ones added via addValidator() on
+    // TronBridge. Since those signer addresses were never registered as
+    // validators on the TRON contract, every signature check there failed
+    // with "Bridge: invalid validator". TRON needs its own
+    // TRON_VALIDATOR_1/2_PRIVATE_KEY (TRON_VALIDATOR_3_PRIVATE_KEY is also
+    // available if you want a 2-of-3 pool there too — only 2 of whichever
+    // are configured are actually used per signature round).
+    const validatorKeys = [process.env.TRON_VALIDATOR_1_PRIVATE_KEY, process.env.TRON_VALIDATOR_2_PRIVATE_KEY]
       .filter((k): k is string => !!k);
     if (validatorKeys.length < 2) {
-      throw new Error('Need at least 2 validator private keys configured');
+      throw new Error('Need at least 2 TRON validator private keys configured (TRON_VALIDATOR_1_PRIVATE_KEY, TRON_VALIDATOR_2_PRIVATE_KEY)');
     }
-    return Promise.all(
-      validatorKeys.map((key) => new ethers.Wallet(key).signMessage(ethers.getBytes(msgHash))),
-    );
+    const wallets    = validatorKeys.map((key) => new ethers.Wallet(key));
+    const signatures = await Promise.all(wallets.map((w) => w.signMessage(ethers.getBytes(msgHash))));
+    const signers    = wallets.map((w) => w.address);
+    return { signatures, signers };
   }
 
-  private getTronBridge() {
+  private async getTronBridge() {
     const tronWeb = new TronWeb({
       fullHost:   process.env.TRON_RPC!,
       privateKey: process.env.RELAYER_TRON_PRIVATE_KEY!,
     });
-    return tronWeb.contract().at(process.env.TRON_BRIDGE_V2_ADDRESS!);
+    // .contract().at(...) returns a Promise — must await it here, otherwise
+    // callers get a Promise<ContractInstance> instead of the actual
+    // contract, and calling .mintTokens()/.unlock() on a Promise doesn't
+    // typecheck (or work at runtime).
+    const bridge = await tronWeb.contract().at(process.env.TRON_BRIDGE_V2_ADDRESS!);
+    return { tronWeb, bridge };
+  }
+
+  // TronWeb's .send() only throws for BROADCAST-level failures (e.g. not
+  // enough bandwidth/energy to even submit). It does NOT throw when the
+  // contract call itself reverts on-chain — it just returns a txID either
+  // way. That's exactly how a mint could log a real transaction hash while
+  // zero tokens were ever actually minted (e.g. the relayer address wasn't
+  // granted RELAYER_ROLE on TronBridge, the token wasn't registered there,
+  // or a validator signer wasn't added via addValidator() on that specific
+  // contract — TRON and EVM bridge deployments are configured separately).
+  // So: poll for the transaction's real receipt and check receipt.result
+  // ourselves — TRON blocks land roughly every 3s, hence the delay/attempts.
+  //
+  // THE FIX: this used to give up after 30s (15 attempts × 2s). That's
+  // often not long enough for TronGrid to finish INDEXING a transaction
+  // (as opposed to it being on-chain) — especially on the public Nile
+  // testnet endpoint, which can lag well past 30s under load. When that
+  // happens, getTransactionInfo() just keeps returning nothing (not a
+  // FAILED result — nothing at all), so the loop exhausts and reports a
+  // generic "not confirmed within 30s" — masking whatever the REAL revert
+  // reason was, even though the receipt would have revealed it (as it did
+  // here: "AccessControl: account ... is missing role ...") if we'd waited
+  // long enough to actually see it. Bumped the budget way up and made it
+  // configurable via TRON_CONFIRM_TIMEOUT_MS for different networks.
+  async verifyTronTx(tronWeb: any, txId: string): Promise<void> {
+    const pollIntervalMs = 2000;
+    const timeoutMs      = Number(process.env.TRON_CONFIRM_TIMEOUT_MS) || 180_000; // 3 minutes
+    const maxAttempts    = Math.ceil(timeoutMs / pollIntervalMs);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+      let info: any;
+      try {
+        info = await tronWeb.trx.getTransactionInfo(txId);
+      } catch {
+        continue; // node hiccup — keep polling
+      }
+
+      if (!info || !info.id) {
+        // Not indexed yet — let the person know we're still waiting rather
+        // than going silent for up to 3 minutes.
+        const elapsed = (attempt + 1) * pollIntervalMs / 1000;
+        if ((attempt + 1) % 10 === 0) { // every ~20s
+          this.logger.debug(`Still waiting on TRON tx ${txId} to be indexed (${elapsed}s elapsed)…`);
+        }
+        continue;
+      }
+
+      if (info.result === 'FAILED' || (info.receipt?.result && info.receipt.result !== 'SUCCESS')) {
+        throw new Error(
+          `TRON transaction ${txId} reverted on-chain: ${info.receipt?.result ?? info.result} ` +
+          `— check the relayer has RELAYER_ROLE and the token/validators are registered on TronBridge`
+        );
+      }
+      return; // confirmed with a successful receipt
+    }
+    throw new Error(
+      `TRON transaction ${txId} was not confirmed within ${timeoutMs / 1000}s — check it manually on Tronscan. ` +
+      `If it's still pending there too, TronGrid's indexing may just be slow right now; if it shows as reverted, ` +
+      `see the failure reason on Tronscan for the real cause (this timeout doesn't necessarily mean it failed).`
+    );
   }
 
   async executeTronMint(transferId: string) {
+    this.assertTestingMode('executeTronMint');
+
     const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
     if (!transfer) throw new NotFoundException('Transfer not found');
     if (transfer.status !== 'LOCKED') {
@@ -363,23 +543,33 @@ export class BridgeService {
     const srcNonce = ethers.keccak256(
       ethers.solidityPacked(['string', 'uint256'], [transfer.srcChain, BigInt(transfer.nonce)]),
     );
-    const sigs = await this.signTronRequest(transfer.token, transfer.dstAddress, amount, transfer.srcChain, srcNonce);
+    const { signatures, signers } = await this.signTronRequest(transfer.token, transfer.dstAddress, amount, transfer.srcChain, srcNonce);
 
-    const bridge = await this.getTronBridge();
+    await this.recordValidatorSignatures(transferId, signers, signatures);
+    await this.prisma.bridgeTransfer.update({ where:{ id:transferId }, data:{ status:'SIGNATURES_COLLECTED' } });
+
+    const { tronWeb, bridge } = await this.getTronBridge();
     const txId = await bridge.mintTokens(
-      transfer.token, transfer.dstAddress, amount.toString(), transfer.srcChain, srcNonce, sigs,
+      transfer.token, transfer.dstAddress, amount.toString(), transfer.srcChain, srcNonce, signatures,
     ).send({ feeLimit: 200_000_000 });
+
+    // THE FIX: verify it actually succeeded before marking COMPLETED —
+    // previously a silent on-chain revert still ended up as "COMPLETED"
+    // with a real-looking txHash, and the user never received anything.
+    await this.verifyTronTx(tronWeb, txId);
 
     await this.prisma.bridgeTransfer.update({
       where: { id:transferId },
       data:  { status:'COMPLETED', dstTxHash: txId },
     });
 
-    this.logger.log(`TRON mint executed: ${txId}`);
+    this.logger.log(`[TESTING] TRON mint confirmed: ${txId}`);
     return { txHash: txId, status:'COMPLETED' };
   }
 
   async executeTronUnlock(transferId: string) {
+    this.assertTestingMode('executeTronUnlock');
+
     const transfer = await this.prisma.bridgeTransfer.findUnique({ where:{ id:transferId } });
     if (!transfer) throw new NotFoundException('Transfer not found');
     if (transfer.status !== 'LOCKED') {
@@ -393,19 +583,24 @@ export class BridgeService {
     const srcNonce = ethers.keccak256(
       ethers.solidityPacked(['string', 'uint256'], [transfer.dstChain, BigInt(transfer.nonce)]),
     );
-    const sigs = await this.signTronRequest(transfer.token, transfer.srcAddress, amount, transfer.dstChain, srcNonce);
+    const { signatures, signers } = await this.signTronRequest(transfer.token, transfer.srcAddress, amount, transfer.dstChain, srcNonce);
 
-    const bridge = await this.getTronBridge();
+    await this.recordValidatorSignatures(transferId, signers, signatures);
+    await this.prisma.bridgeTransfer.update({ where:{ id:transferId }, data:{ status:'SIGNATURES_COLLECTED' } });
+
+    const { tronWeb, bridge } = await this.getTronBridge();
     const txId = await bridge.unlock(
-      transfer.token, transfer.srcAddress, amount.toString(), transfer.dstChain, srcNonce, sigs,
+      transfer.token, transfer.srcAddress, amount.toString(), transfer.dstChain, srcNonce, signatures,
     ).send({ feeLimit: 200_000_000 });
+
+    await this.verifyTronTx(tronWeb, txId);
 
     await this.prisma.bridgeTransfer.update({
       where: { id:transferId },
       data:  { status:'COMPLETED', dstTxHash: txId },
     });
 
-    this.logger.log(`TRON unlock executed: ${txId}`);
+    this.logger.log(`[TESTING] TRON unlock confirmed: ${txId}`);
     return { txHash: txId, status:'COMPLETED' };
   }
 

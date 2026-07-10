@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
+import { useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import { Header }    from '../../components/ui/Header';
 import { Button }    from '../../components/ui/Button';
@@ -12,6 +13,7 @@ import { Card }      from '../../components/ui/Card';
 import { TokenIcon } from '../../components/ui/TokenIcon';
 import { colors, typography, spacing, radius } from '../../theme';
 import { api } from '../../services/api';
+import type { RootState } from '../../store';
 
 const TAB_H = Platform.OS === 'ios' ? 84 : 68;
 
@@ -19,6 +21,7 @@ export default function PayQRScreen() {
   const navigation = useNavigation<any>();
   const insets     = useSafeAreaInsets();
   const footerPb   = insets.bottom > 0 ? insets.bottom + 8 : TAB_H + 8;
+  const { activeWalletIndex } = useSelector((s: RootState) => s.wallet);
 
   const [payment,  setPayment]  = useState<any>(null);
   const [manualId, setManualId] = useState('');
@@ -52,6 +55,7 @@ export default function PayQRScreen() {
         chain:     payment.settlementChain,
         toAddress: payment.settlementAddress,
         amount:    payment.amount.toString(),
+        walletIndex: activeWalletIndex,
       });
       Alert.alert('Payment sent', 'Your payment is being processed.', [
         { text: 'OK', onPress: () => navigation.navigate('DashboardTab') },

@@ -1,15 +1,17 @@
-import React from 'react';
-import { View, StyleSheet, Platform } from 'react-native';
-import { useSelector }                from 'react-redux';
+import React, { useEffect, useRef } from 'react';
+import { View, StyleSheet, Platform, AppState, AppStateStatus } from 'react-native';
+import { useSelector, useDispatch }    from 'react-redux';
+import AsyncStorage                    from '@react-native-async-storage/async-storage';
 import { NavigationContainer }        from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator }   from '@react-navigation/bottom-tabs';
 import { Ionicons }                   from '@expo/vector-icons';
 
-import WelcomeScreen     from '../screens/auth/WelcomeScreen';
-import LoginScreen       from '../screens/auth/LoginScreen';
-import RegisterScreen    from '../screens/auth/RegisterScreen';
-import WalletSetupScreen from '../screens/auth/WalletSetupScreen';
+import WelcomeScreen        from '../screens/auth/WelcomeScreen';
+import LoginScreen          from '../screens/auth/LoginScreen';
+import RegisterScreen       from '../screens/auth/RegisterScreen';
+import WalletSetupScreen    from '../screens/auth/WalletSetupScreen';
+import BiometricLockScreen  from '../screens/auth/BiometricLockScreen';
 import DashboardScreen         from '../screens/wallet/DashboardScreen';
 import SendScreen              from '../screens/wallet/SendScreen';
 import ReceiveScreen           from '../screens/wallet/ReceiveScreen';
@@ -28,9 +30,11 @@ import MerchantRegisterScreen from '../screens/profile/MerchantRegisterScreen';
 import SettingsScreen         from '../screens/settings/SettingsScreen';
 import WalletManagerScreen    from '../screens/wallet/WalletManagerScreen';
 import NotificationsScreen    from '../screens/notifications/NotificationsScreen';
+import TreasuryRequestScreen from '../screens/treasury/TreasuryRequestScreen';
 
 import { colors } from '../theme';
-import type { RootState } from '../store';
+import { relockApp } from '../store/slices/authSlice';
+import type { AppDispatch, RootState } from '../store';
 
 const Stack = createNativeStackNavigator();
 const Tab   = createBottomTabNavigator();
@@ -61,6 +65,7 @@ function DashboardStack() {
       <Stack.Screen name="Notifications"    component={NotificationsScreen} />
       <Stack.Screen name="MerchantRegister" component={MerchantRegisterScreen} />
       <Stack.Screen name="WalletManager"    component={WalletManagerScreen} />
+      <Stack.Screen name="TransactionDetail" component={TransactionDetailScreen} />
     </Stack.Navigator>
   );
 }
@@ -92,8 +97,9 @@ function ProfileStack() {
       <Stack.Screen name="MerchantRegister" component={MerchantRegisterScreen} />
       <Stack.Screen name="Kyc"              component={KycScreen} />
       <Stack.Screen name="Notifications"    component={NotificationsScreen} />
-      {/* WalletManager registered here so Settings can navigate to it */}
       <Stack.Screen name="WalletManager"    component={WalletManagerScreen} />
+      <Stack.Screen name="TransactionDetail" component={TransactionDetailScreen} />
+      <Stack.Screen name="TreasuryRequest" component={TreasuryRequestScreen} />
     </Stack.Navigator>
   );
 }
@@ -135,13 +141,35 @@ function MainTabs() {
   );
 }
 
+const K_BIO = '@pref_biometric';
+
 export default function AppNavigator() {
-  const { isAuthenticated } = useSelector((s: RootState) => s.auth);
-  const { walletReady }     = useSelector((s: RootState) => s.wallet);
+  const dispatch = useDispatch<AppDispatch>();
+  const { isAuthenticated, locked } = useSelector((s: RootState) => s.auth);
+  const { walletReady }             = useSelector((s: RootState) => s.wallet);
+
+  // Re-arm the biometric gate whenever the app comes back from the
+  // background/inactive state — this is the actual point of biometric
+  // login: it doesn't replace password + 2FA (those authenticate a brand
+  // new session with the server), it re-confirms it's still you holding
+  // *this* device before an already-unlocked session is shown again, e.g.
+  // after someone else picks up your phone or you reopen the app later.
+  const appState = useRef(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async (next: AppStateStatus) => {
+      const wasBackground = appState.current.match(/inactive|background/);
+      if (wasBackground && next === 'active' && isAuthenticated && walletReady) {
+        const bioPref = await AsyncStorage.getItem(K_BIO);
+        if (bioPref === 'true') dispatch(relockApp());
+      }
+      appState.current = next;
+    });
+    return () => sub.remove();
+  }, [dispatch, isAuthenticated, walletReady]);
 
   let initialRoute = 'Auth';
   if (isAuthenticated && !walletReady) initialRoute = 'WalletSetupModal';
-  if (isAuthenticated && walletReady)  initialRoute = 'Main';
+  if (isAuthenticated && walletReady)  initialRoute = locked ? 'BiometricLock' : 'Main';
 
   return (
     <NavigationContainer>
@@ -155,6 +183,11 @@ export default function AppNavigator() {
       <Stack.Screen
         name="WalletSetupModal"
         component={WalletSetupScreen}
+      />
+    ) : locked ? (
+      <Stack.Screen
+        name="BiometricLock"
+        component={BiometricLockScreen}
       />
     ) : (
       <Stack.Screen

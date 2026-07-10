@@ -4,6 +4,7 @@ import {
   Alert, TouchableOpacity, TextInput, Platform,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import * as Clipboard from 'expo-clipboard';
 import { Ionicons }   from '@expo/vector-icons';
 import QRCode         from 'react-native-qrcode-svg';
@@ -14,24 +15,39 @@ import { colors, typography, spacing, radius, shadow } from '../../theme';
 import { api } from '../../services/api';
 
 type Step = 'intro' | 'setup' | 'verify' | 'done';
+type Mode = 'enable' | 'disable';
 
 // Footer height: button 54px + paddingTop 12 + paddingBottom dynamic
 const FOOTER_BTN_AREA = 54 + 12; // button height + top padding
 
 export default function TwoFactorSetupScreen() {
-  const insets = useSafeAreaInsets();
+  const insets     = useSafeAreaInsets();
+  const navigation = useNavigation<any>();
+  const route      = useRoute<any>();
+  // Coming from Profile's "disable 2FA?" alert skips straight to code entry —
+  // there's nothing to "set up", the account already has 2FA on.
+  const mode: Mode = route.params?.mode === 'disable' ? 'disable' : 'enable';
+
   // How much space the absolute footer occupies at the bottom
   // = button + top padding + bottom safe area (home bar)
   const footerHeight = FOOTER_BTN_AREA + insets.bottom + 8;
   // Extra height for steps with two buttons
   const footerHeightDouble = FOOTER_BTN_AREA + 54 + spacing.sm + insets.bottom + 8;
 
-  const [step,    setStep]    = useState<Step>('intro');
+  const [step,    setStep]    = useState<Step>(mode === 'disable' ? 'verify' : 'intro');
   const [otpUri,  setOtpUri]  = useState('');
   const [secret,  setSecret]  = useState('');
   const [code,    setCode]    = useState('');
   const [loading, setLoading] = useState(false);
   const [copied,  setCopied]  = useState(false);
+
+  const goToProfile = () => {
+    // Reset local state in case this screen instance gets reused, then
+    // return to Profile so the updated 2FA status is visible immediately.
+    setStep('intro');
+    setCode('');
+    navigation.navigate('Profile');
+  };
 
   const handleSetup = async () => {
     setLoading(true);
@@ -58,31 +74,53 @@ export default function TwoFactorSetupScreen() {
     }
     setLoading(true);
     try {
-      await api.verify2FA({ token: code.replace(/\D/g, '') });
+      if (mode === 'disable') {
+        await api.disable2FA({ token: code.replace(/\D/g, '') });
+      } else {
+        await api.verify2FA({ token: code.replace(/\D/g, '') });
+      }
       setStep('done');
-    } catch {
-      Alert.alert('Wrong code', 'Incorrect or expired — wait for the next 30-second code and try again.');
+    } catch (err: any) {
+      const msg = err?.response?.data?.message;
+      Alert.alert(
+        'Wrong code',
+        msg ?? 'Incorrect or expired — wait for the next 30-second code and try again.',
+      );
     } finally { setLoading(false); }
   };
 
   // ── DONE ──────────────────────────────────────────────────────────────────
   if (step === 'done') {
+    const disabled = mode === 'disable';
     return (
       <SafeAreaView style={styles.flex} edges={[]}>
         <Header title="Two-Factor Auth" />
         <View style={styles.flex}>
           <View style={[styles.centerFill, { bottom: insets.bottom + 75 }]} >
-            <View style={[styles.bigIcon, { backgroundColor: colors.successBg, borderColor: colors.success + '50' }]}>
-              <Ionicons name="shield-checkmark" size={44} color={colors.success} />
+            <View
+              style={[
+                styles.bigIcon,
+                disabled
+                  ? { backgroundColor: colors.surfaceHigh, borderColor: colors.border }
+                  : { backgroundColor: colors.successBg, borderColor: colors.success + '50' },
+              ]}
+            >
+              <Ionicons
+                name={disabled ? 'shield-outline' : 'shield-checkmark'}
+                size={44}
+                color={disabled ? colors.textSecondary : colors.success}
+              />
             </View>
-            <Text style={styles.heading}>2FA Enabled!</Text>
+            <Text style={styles.heading}>{disabled ? '2FA Disabled' : '2FA Enabled!'}</Text>
             <Text style={styles.bodyText}>
-              Your wallet is now protected. Every login requires a 6-digit code from your authenticator app.
+              {disabled
+                ? 'Two-factor authentication has been turned off. Your account now only needs your password to log in.'
+                : 'Your wallet is now protected. Every login requires a 6-digit code from your authenticator app.'}
             </Text>
           </View>
           {/* Absolute footer — always visible regardless of content */}
           <View style={[styles.footer, { bottom: insets.bottom + 75 }]}>
-            <Button label="Done" onPress={() => setStep('intro')} />
+            <Button label="Done" onPress={goToProfile} />
           </View>
         </View>
       </SafeAreaView>
@@ -91,9 +129,10 @@ export default function TwoFactorSetupScreen() {
 
   // ── VERIFY ────────────────────────────────────────────────────────────────
   if (step === 'verify') {
+    const isDisable = mode === 'disable';
     return (
       <SafeAreaView style={styles.flex} edges={[]}>
-        <Header title="Enter Code" />
+        <Header title={isDisable ? 'Disable 2FA' : 'Enter Code'} />
         <View style={styles.flex}>
           <ScrollView
             contentContainerStyle={[styles.scrollPad, { paddingBottom: footerHeightDouble + spacing.xl }]}
@@ -105,8 +144,14 @@ export default function TwoFactorSetupScreen() {
             </View>
             <Text style={styles.heading}>Enter the 6-digit code</Text>
             <Text style={styles.bodyText}>
-              Open your authenticator app and type the code shown for{' '}
-              <Text style={{ color: colors.text, fontWeight: '700' as const }}>Stablecoin Ecosystem</Text>.
+              {isDisable
+                ? 'To confirm disabling 2FA, enter the current code from your authenticator app.'
+                : (
+                  <>
+                    Open your authenticator app and type the code shown for{' '}
+                    <Text style={{ color: colors.text, fontWeight: '700' as const }}>Stablecoin Ecosystem</Text>.
+                  </>
+                )}
             </Text>
             <TextInput
               style={styles.codeInput}
@@ -123,13 +168,17 @@ export default function TwoFactorSetupScreen() {
           </ScrollView>
           <View style={[styles.footer, { bottom: insets.bottom + 8 }]}>
             <Button
-              label="Verify & Enable 2FA"
+              label={isDisable ? 'Confirm & Disable 2FA' : 'Verify & Enable 2FA'}
               onPress={handleVerify}
               loading={loading}
               disabled={code.replace(/\D/g, '').length !== 6}
             />
             <View style={{ height: spacing.sm }} />
-            <Button label="Back" variant="ghost" onPress={() => setStep('setup')} />
+            <Button
+              label="Back"
+              variant="ghost"
+              onPress={() => (isDisable ? navigation.goBack() : setStep('setup'))}
+            />
           </View>
         </View>
       </SafeAreaView>

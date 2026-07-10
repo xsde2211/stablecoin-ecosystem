@@ -6,6 +6,39 @@ import { UpdateRoleDto } from './dto/update-role.dto';
 import { SuspendUserDto} from './dto/suspend-user.dto';
 import { UserRole } from '@prisma/client';
 
+// ─── On-chain role registry ─────────────────────────────────────────────────
+//
+// Matches your deployed contracts exactly:
+//   INRX / EGold / ESilver  → MINTER_ROLE, BURNER_ROLE, FREEZER_ROLE, BLACKLISTER_ROLE, UPGRADER_ROLE, TREASURY_ROLE
+//   TreasuryTimelock        → SIGNER_ROLE, GUARDIAN_ROLE
+//   StablecoinBridgeV2      → VALIDATOR_ROLE, RELAYER_ROLE, PAUSER_ROLE
+//   ReserveVault            → CUSTODIAN_ROLE, AUDITOR_ROLE
+//   OracleManager           → ORACLE_ROLE, MANAGER_ROLE
+//
+// Only EVM chains — these contracts use OpenZeppelin AccessControl, which the
+// TRON side doesn't mirror consistently, so it's intentionally left out here.
+
+const TOKEN_ROLES = ['MINTER_ROLE', 'BURNER_ROLE', 'FREEZER_ROLE', 'BLACKLISTER_ROLE', 'UPGRADER_ROLE', 'TREASURY_ROLE'];
+
+const CONTRACT_REGISTRY: Record<string, { label: string; envSuffix: string; roles: string[] }> = {
+  INRX:              { label: 'INRX',              envSuffix: 'INRX_ADDRESS',              roles: TOKEN_ROLES },
+  EGOLD:             { label: 'EGold',              envSuffix: 'EGOLD_ADDRESS',             roles: TOKEN_ROLES },
+  ESLVR:             { label: 'ESilver',            envSuffix: 'ESLVR_ADDRESS',             roles: TOKEN_ROLES },
+  TREASURY_TIMELOCK: { label: 'TreasuryTimelock',   envSuffix: 'TREASURY_TIMELOCK_ADDRESS', roles: ['SIGNER_ROLE', 'GUARDIAN_ROLE'] },
+  BRIDGE_V2:         { label: 'StablecoinBridgeV2', envSuffix: 'BRIDGE_V2_ADDRESS',          roles: ['VALIDATOR_ROLE', 'RELAYER_ROLE', 'PAUSER_ROLE'] },
+  RESERVE_VAULT:     { label: 'ReserveVault',       envSuffix: 'RESERVE_VAULT_ADDRESS',      roles: ['CUSTODIAN_ROLE', 'AUDITOR_ROLE'] },
+  ORACLE_MANAGER:    { label: 'OracleManager',      envSuffix: 'ORACLE_MANAGER_ADDRESS',     roles: ['ORACLE_ROLE', 'MANAGER_ROLE'] },
+};
+
+const EVM_CHAIN_PREFIX: Record<string, string> = { ethereum: 'ETH', bsc: 'BSC', polygon: 'POLYGON' };
+const EVM_RPC_ENV: Record<string, string> = { ethereum: 'ETH_RPC', bsc: 'BSC_RPC', polygon: 'POLYGON_RPC' };
+
+const ACCESS_CONTROL_ABI = [
+  'function grantRole(bytes32 role, address account)',
+  'function revokeRole(bytes32 role, address account)',
+  'function hasRole(bytes32 role, address account) view returns (bool)',
+];
+
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
@@ -97,6 +130,18 @@ export class AdminService {
     });
 
     this.logger.log(`User ${userId} role changed: ${oldRole} → ${dto.role} by ${updatedBy}`);
+
+    // Requirement: every SUPER_ADMIN automatically gets every on-chain role,
+    // on every contract, on every EVM chain, for their own wallet. This is
+    // many sequential on-chain transactions (contracts × roles × chains), so
+    // it runs in the background rather than blocking this response — check
+    // the audit log or GET /admin/users/:id/onchain-roles for progress.
+    if (dto.role === 'SUPER_ADMIN' && oldRole !== 'SUPER_ADMIN') {
+      this.grantAllRolesToUser(userId, updatedBy).catch((err) =>
+        this.logger.error(`Auto on-chain role grant failed for ${userId}: ${err.message}`)
+      );
+    }
+
     return { message:'Role updated', userId, oldRole, newRole:dto.role };
   }
 
@@ -267,5 +312,151 @@ export class AdminService {
       staffUsers,
       generatedAt: new Date().toISOString(),
     };
+  }
+
+  // ─── On-chain role management — SUPER_ADMIN only (enforced by SuperAdminGuard) ─
+
+  getRoleRegistry() {
+    return {
+      chains: Object.keys(EVM_CHAIN_PREFIX),
+      contracts: Object.entries(CONTRACT_REGISTRY).map(([key, v]) => ({
+        key, label: v.label, roles: v.roles,
+      })),
+    };
+  }
+
+  private getContractAddress(chain: string, contractKey: string): string {
+    const prefix = EVM_CHAIN_PREFIX[chain];
+    if (!prefix) throw new BadRequestException(`Unsupported chain for on-chain roles: ${chain}`);
+    const entry = CONTRACT_REGISTRY[contractKey];
+    if (!entry) throw new BadRequestException(`Unknown contract: ${contractKey}`);
+    const address = process.env[`${prefix}_${entry.envSuffix}`];
+    if (!address) throw new BadRequestException(`${entry.label} is not configured on ${chain}`);
+    return address;
+  }
+
+  private getDeployerSigner(chain: string): ethers.Wallet {
+    const rpcEnvVar = EVM_RPC_ENV[chain];
+    const rpcUrl = rpcEnvVar && process.env[rpcEnvVar];
+    if (!rpcUrl) throw new BadRequestException(`No RPC configured for ${chain}`);
+
+    const deployerKey = process.env.DEPLOYER_PRIVATE_KEY;
+    if (!deployerKey) throw new Error('DEPLOYER_PRIVATE_KEY not configured — cannot administer on-chain roles');
+
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    return new ethers.Wallet(deployerKey, provider);
+  }
+
+  private assertValidRole(contractKey: string, roleName: string) {
+    const entry = CONTRACT_REGISTRY[contractKey];
+    if (!entry) throw new BadRequestException(`Unknown contract: ${contractKey}`);
+    if (!entry.roles.includes(roleName)) {
+      throw new BadRequestException(`${roleName} is not a valid role for ${entry.label}. Valid roles: ${entry.roles.join(', ')}`);
+    }
+  }
+
+  private async setOnChainRole(
+    chain: string, contractKey: string, roleName: string, targetAddress: string,
+    actingUserId: string, action: 'grant' | 'revoke',
+  ) {
+    this.assertValidRole(contractKey, roleName);
+    if (!ethers.isAddress(targetAddress)) throw new BadRequestException('Invalid target address');
+
+    const contractAddress = this.getContractAddress(chain, contractKey);
+    const signer   = this.getDeployerSigner(chain);
+    const contract = new ethers.Contract(contractAddress, ACCESS_CONTROL_ABI, signer);
+    const roleHash = ethers.keccak256(ethers.toUtf8Bytes(roleName));
+
+    const tx = action === 'grant'
+      ? await contract.grantRole(roleHash, targetAddress)
+      : await contract.revokeRole(roleHash, targetAddress);
+    const receipt = await tx.wait();
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId:     actingUserId,
+        action:     action === 'grant' ? 'ADMIN_GRANT_ONCHAIN_ROLE' : 'ADMIN_REVOKE_ONCHAIN_ROLE',
+        entityType: 'OnChainRole',
+        entityId:   `${chain}:${contractKey}:${roleName}`,
+        payload:    { chain, contract: contractKey, role: roleName, target: targetAddress, txHash: receipt.hash },
+      },
+    });
+
+    this.logger.warn(
+      `${action.toUpperCase()} ${roleName} on ${CONTRACT_REGISTRY[contractKey].label}/${chain} for ${targetAddress} by ${actingUserId} (tx ${receipt.hash})`
+    );
+
+    return {
+      txHash: receipt.hash, status: 'CONFIRMED',
+      chain, contract: contractKey, role: roleName, target: targetAddress, action,
+    };
+  }
+
+  grantOnChainRole(chain: string, contractKey: string, roleName: string, targetAddress: string, actingUserId: string) {
+    return this.setOnChainRole(chain, contractKey, roleName, targetAddress, actingUserId, 'grant');
+  }
+
+  revokeOnChainRole(chain: string, contractKey: string, roleName: string, targetAddress: string, actingUserId: string) {
+    return this.setOnChainRole(chain, contractKey, roleName, targetAddress, actingUserId, 'revoke');
+  }
+
+  async checkOnChainRole(chain: string, contractKey: string, roleName: string, targetAddress: string) {
+    this.assertValidRole(contractKey, roleName);
+    if (!ethers.isAddress(targetAddress)) throw new BadRequestException('Invalid address');
+
+    const contractAddress = this.getContractAddress(chain, contractKey);
+    const rpcUrl = process.env[EVM_RPC_ENV[chain]]!;
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const contract = new ethers.Contract(contractAddress, ACCESS_CONTROL_ABI, provider);
+    const roleHash = ethers.keccak256(ethers.toUtf8Bytes(roleName));
+
+    const hasRole = await contract.hasRole(roleHash, targetAddress);
+    return { chain, contract: contractKey, role: roleName, target: targetAddress, hasRole };
+  }
+
+  // Requirement #1: a SUPER_ADMIN automatically gets EVERY role, on EVERY
+  // contract, on EVERY EVM chain, for each of their own wallets. Sequential
+  // on-chain transactions — can take a while for many wallets/contracts/roles,
+  // so callers (updateRole, and the manual re-sync endpoint) run this in the
+  // background rather than awaiting it inline.
+  async grantAllRolesToUser(userId: string, actingUserId: string) {
+    const wallets = await this.prisma.wallet.findMany({
+      where: { userId, chain: { in: Object.keys(EVM_CHAIN_PREFIX) } },
+    });
+    if (!wallets.length) {
+      throw new BadRequestException('User has no EVM wallet yet — they must create a wallet before roles can be granted');
+    }
+
+    const results: Array<Record<string, any>> = [];
+
+    for (const wallet of wallets) {
+      for (const contractKey of Object.keys(CONTRACT_REGISTRY)) {
+        let contractAddress: string;
+        try { contractAddress = this.getContractAddress(wallet.chain, contractKey); }
+        catch { continue; } // contract not deployed on this chain — skip quietly
+
+        for (const roleName of CONTRACT_REGISTRY[contractKey].roles) {
+          try {
+            const res = await this.grantOnChainRole(wallet.chain, contractKey, roleName, wallet.address, actingUserId);
+            results.push({ ...res, ok: true });
+          } catch (err: any) {
+            results.push({ chain: wallet.chain, contract: contractKey, role: roleName, target: wallet.address, ok: false, error: err.message });
+          }
+        }
+      }
+    }
+
+    const grantedCount = results.filter((r) => r.ok).length;
+    const failedCount  = results.filter((r) => !r.ok).length;
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId: actingUserId, action: 'ADMIN_GRANT_ALL_ONCHAIN_ROLES', entityType: 'User', entityId: userId,
+        payload: { grantedCount, failedCount },
+      },
+    });
+
+    this.logger.warn(`Granted ${grantedCount} on-chain roles (${failedCount} failed) to SUPER_ADMIN user ${userId}`);
+    return { userId, grantedCount, failedCount, results };
   }
 }

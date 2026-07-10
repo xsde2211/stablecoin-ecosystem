@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   SafeAreaView, Alert,
 } from 'react-native';
 import { Ionicons }      from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useDispatch, useSelector } from 'react-redux';
 import { Header }   from '../../components/ui/Header';
 import { Card }     from '../../components/ui/Card';
@@ -27,16 +27,23 @@ export default function ProfileScreen() {
   const dispatch   = useDispatch<AppDispatch>();
   const { user }   = useSelector((s: RootState) => s.auth);
 
-  const [kycStatus, setKycStatus] = useState('NOT_SUBMITTED');
-  const [twoFaOn,   setTwoFaOn]   = useState(false);
-  const [loading,   setLoading]   = useState(true);
+  const [kycStatus,   setKycStatus]   = useState('NOT_SUBMITTED');
+  const [twoFaOn,     setTwoFaOn]     = useState(false);
+  const [walletCount, setWalletCount] = useState(0);
+  const [loading,     setLoading]     = useState(true);
 
-  useEffect(() => {
-    Promise.allSettled([
-      api.getKycStatus().then(r => setKycStatus(r.kycStatus ?? 'NOT_SUBMITTED')),
-      api.getMe().then((r: any) => setTwoFaOn(!!r.twoFaEnabled)),
-    ]).finally(() => setLoading(false));
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      setLoading(true);
+      Promise.allSettled([
+        api.getKycStatus().then(r => { if (!cancelled) setKycStatus(r.kycStatus ?? 'NOT_SUBMITTED'); }),
+        api.getMe().then((r: any) => { if (!cancelled) setTwoFaOn(!!r.twoFaEnabled); }),
+        api.getWallets().then((list: any) => { if (!cancelled) setWalletCount(Array.isArray(list) ? list.length : 0); }),
+      ]).finally(() => { if (!cancelled) setLoading(false); });
+      return () => { cancelled = true; };
+    }, [])
+  );
 
   // Display name: never shows raw email like "sourabhgupta1221"
   const displayName = (() => {
@@ -45,7 +52,6 @@ export default function ProfileScreen() {
     if (u.fullName) return u.fullName;
     if (u.name)     return u.name;
     const local = (u.email ?? '').split('@')[0] ?? '';
-    // Strip numbers, capitalise: sourabhgupta1221 → Sourabh Gupta
     const clean = local.replace(/[0-9]/g, '').replace(/([a-z])([A-Z])/g, '$1 $2');
     return clean.charAt(0).toUpperCase() + clean.slice(1);
   })();
@@ -60,12 +66,30 @@ export default function ProfileScreen() {
       { text: 'Log out', style: 'destructive', onPress: () => dispatch(logout()) },
     ]);
 
+  const handleTwoFaPress = () => {
+    if (twoFaOn) {
+      Alert.alert(
+        'Disable 2FA?',
+        'Your account will only need your password to log in. Are you sure you want to turn off two-factor authentication?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Disable',
+            style: 'destructive',
+            onPress: () => navigation.navigate('TwoFactorSetup', { mode: 'disable' }),
+          },
+        ],
+      );
+    } else {
+      navigation.navigate('TwoFactorSetup', { mode: 'enable' });
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <Header title="Profile" showBack={false} />
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
 
-        {/* Avatar section */}
         <View style={styles.avatarSection}>
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>{initial}</Text>
@@ -78,35 +102,31 @@ export default function ProfileScreen() {
           </View>
         </View>
 
-        {/* Stats strip */}
         {!loading ? (
           <View style={styles.statsStrip}>
             <StatPill icon="shield-checkmark-outline" label="KYC"      value={kycStatus === 'APPROVED' ? 'Done'    : 'Pending'} active={kycStatus === 'APPROVED'} />
             <View style={styles.divider} />
             <StatPill icon="lock-closed-outline"      label="2FA"      value={twoFaOn ? 'On' : 'Off'}                          active={twoFaOn} />
             <View style={styles.divider} />
-            <StatPill icon="wallet-outline"           label="Wallets"  value="5"                                               active />
+            <StatPill icon="wallet-outline"           label="Wallets"  value={String(walletCount)}                             active={walletCount > 0} />
           </View>
         ) : (
           <Skeleton width="100%" height={64} style={{ borderRadius: radius.xl, marginBottom: spacing.xl }} />
         )}
 
-        {/* Account */}
         <Text style={styles.sec}>Account</Text>
         <Card padding={0}>
           <MenuRow icon="document-text-outline" label="Identity Verification" desc={kycCfg.label}                right={<Badge label={kycCfg.label} variant={kycCfg.variant} />} onPress={() => navigation.navigate('Kyc')} />
           <MenuRow icon="storefront-outline"    label="Merchant Account"      desc="Create payment QR codes"     onPress={() => navigation.navigate('MerchantRegister')} />
-          <MenuRow icon="lock-closed-outline"   label="Two-Factor Auth"       desc={twoFaOn ? 'Enabled — secure' : 'Disabled — tap to enable'} right={<Badge label={twoFaOn ? 'On' : 'Off'} variant={twoFaOn ? 'success' : 'default'} />} onPress={() => navigation.navigate('TwoFactorSetup')} last />
+          <MenuRow icon="lock-closed-outline"   label="Two-Factor Auth"       desc={twoFaOn ? 'Enabled — tap to disable' : 'Disabled — tap to enable'} right={<Badge label={twoFaOn ? 'On' : 'Off'} variant={twoFaOn ? 'success' : 'default'} />} onPress={handleTwoFaPress} last />
         </Card>
 
-        {/* Settings */}
         <Text style={styles.sec}>Settings & Security</Text>
         <Card padding={0}>
           <MenuRow icon="settings-outline"      label="App Settings"   desc="Password, biometrics, notifications" onPress={() => navigation.navigate('Settings')} />
           <MenuRow icon="notifications-outline" label="Notifications"  desc="View your alerts"                    onPress={() => navigation.navigate('Notifications')} last />
         </Card>
 
-        {/* Logout */}
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout} activeOpacity={0.8}>
           <Ionicons name="log-out-outline" size={18} color={colors.error} />
           <Text style={styles.logoutText}>Log Out</Text>

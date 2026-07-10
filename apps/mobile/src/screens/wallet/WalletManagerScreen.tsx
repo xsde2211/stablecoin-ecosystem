@@ -4,11 +4,10 @@ import {
   Alert, TextInput, Platform, RefreshControl,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import AsyncStorage   from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import { Ionicons }   from '@expo/vector-icons';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { Header }   from '../../components/ui/Header';
 import { Card }     from '../../components/ui/Card';
 import { Button }   from '../../components/ui/Button';
@@ -16,10 +15,8 @@ import { Skeleton } from '../../components/ui/Skeleton';
 import { ChainBadge } from '../../components/ui/ChainBadge';
 import { colors, typography, spacing, radius } from '../../theme';
 import { api }    from '../../services/api';
-import { fetchAddresses, fetchBalances, setWalletReady } from '../../store/slices/walletSlice';
-import type { AppDispatch } from '../../store';
-
-const K_ACTIVE_IDX = '@active_wallet_index'; // stores number as string
+import { setWalletReady, switchActiveWallet } from '../../store/slices/walletSlice';
+import type { AppDispatch, RootState } from '../../store';
 
 const CHAIN_ORDER = ['tron', 'ethereum', 'bsc', 'polygon', 'solana'];
 const CHAIN_LABEL: Record<string, string> = {
@@ -41,8 +38,15 @@ export default function WalletManagerScreen() {
   const dispatch   = useDispatch<AppDispatch>();
   const insets     = useSafeAreaInsets();
 
+  // The active wallet index lives in Redux (walletSlice), not local
+  // component state — this is what lets every other screen (Dashboard,
+  // Send, Receive, TokenDetail, Bridge, PayQR, Transactions, ...) know
+  // which wallet is active too. Switching/importing/deleting here all
+  // go through the switchActiveWallet thunk so Redux + AsyncStorage +
+  // every other screen's data all update together.
+  const activeIdx = useSelector((s: RootState) => s.wallet.activeWalletIndex);
+
   const [wallets,      setWallets]      = useState<WalletEntry[]>([]);
-  const [activeIdx,    setActiveIdx]    = useState(0);
   const [expanded,     setExpanded]     = useState<number | null>(null);
   const [editingIdx,   setEditingIdx]   = useState<number | null>(null);
   const [editName,     setEditName]     = useState('');
@@ -56,13 +60,10 @@ export default function WalletManagerScreen() {
 
   const load = useCallback(async () => {
     try {
-      // Load wallets from backend — single source of truth
+      // Load wallets from backend — single source of truth. Soft-deleted
+      // wallets are already excluded server-side (isActive: true filter).
       const list = await api.getWallets();
       setWallets(Array.isArray(list) ? list : []);
-
-      // Load active index from AsyncStorage
-      const raw = await AsyncStorage.getItem(K_ACTIVE_IDX);
-      setActiveIdx(raw ? parseInt(raw, 10) : 0);
     } catch (err: any) {
       Alert.alert('Error', 'Failed to load wallets');
     } finally {
@@ -86,11 +87,10 @@ export default function WalletManagerScreen() {
         {
           text: 'Switch',
           onPress: async () => {
-            setActiveIdx(w.walletIndex);
-            await AsyncStorage.setItem(K_ACTIVE_IDX, String(w.walletIndex));
-            // Re-fetch addresses and balances for new active wallet
-            await dispatch(fetchAddresses());
-            await dispatch(fetchBalances());
+            // Persists to AsyncStorage, updates Redux's activeWalletIndex
+            // (read by every other screen), and refetches
+            // addresses/balances/transactions for wallet w.
+            await dispatch(switchActiveWallet(w.walletIndex));
             Alert.alert('Switched ✓', `Now using ${w.label}`);
           },
         },
@@ -103,7 +103,7 @@ export default function WalletManagerScreen() {
     if (!editName.trim()) { Alert.alert('Name required'); return; }
     try {
       await api.renameWallet(walletIndex, editName.trim());
-      await load(); // reload from backend
+      await load();
     } catch {
       Alert.alert('Error', 'Failed to rename wallet');
     } finally {
@@ -132,7 +132,7 @@ export default function WalletManagerScreen() {
             setCreating(true);
             try {
               const res = await api.createWallet();
-              await load(); // reload list from backend
+              await load();
 
               if (res?.mnemonic) {
                 Alert.alert(
@@ -162,12 +162,9 @@ export default function WalletManagerScreen() {
     setImporting(true);
     try {
       const res = await api.importWallet({ mnemonic: importPhrase.trim() });
-      // Switch to newly imported wallet
+      // Switch to newly imported wallet (persists + refetches everywhere)
       const newIdx = res?.walletIndex ?? 0;
-      setActiveIdx(newIdx);
-      await AsyncStorage.setItem(K_ACTIVE_IDX, String(newIdx));
-      await dispatch(fetchAddresses());
-      await dispatch(fetchBalances());
+      await dispatch(switchActiveWallet(newIdx));
       dispatch(setWalletReady(true));
       await load();
       setShowImport(false);
@@ -178,6 +175,45 @@ export default function WalletManagerScreen() {
     } finally { setImporting(false); }
   };
 
+  // ── Delete wallet ─────────────────────────────────────────────────────────
+  const handleDelete = (w: WalletEntry) => {
+    if (wallets.length <= 1) {
+      Alert.alert('Cannot delete', 'You need at least one wallet. Create or import another wallet before deleting this one.');
+      return;
+    }
+    Alert.alert(
+      `Delete "${w.label}"?`,
+      'This removes the wallet from your account. Make sure you\'ve saved its seed phrase — without it you will permanently lose access to any funds in it.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await api.deleteWallet(w.walletIndex);
+              // If the deleted wallet was active, fall back to whichever
+              // wallet remains first — routed through switchActiveWallet so
+              // Redux + AsyncStorage + every other screen's data update
+              // together, instead of pointing at a wallet that no longer
+              // exists.
+              if (w.walletIndex === activeIdx) {
+                const remaining = wallets.filter(x => x.walletIndex !== w.walletIndex);
+                const next = remaining[0];
+                if (next) {
+                  await dispatch(switchActiveWallet(next.walletIndex));
+                }
+              }
+              await load();
+            } catch (err: any) {
+              Alert.alert('Error', err?.response?.data?.message ?? 'Failed to delete wallet');
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const footerBottom = TAB_H + FOOTER_EXTRA;
 
   return (
@@ -185,7 +221,7 @@ export default function WalletManagerScreen() {
       <Header title="Manage Wallets" />
       <View style={styles.flex}>
         <ScrollView
-          contentContainerStyle={[styles.content, { paddingBottom: footerBottom + 80 }]}
+          contentContainerStyle={[styles.content, { paddingBottom: footerBottom + 24 }]}
           showsVerticalScrollIndicator={false}
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.teal} />
@@ -258,6 +294,16 @@ export default function WalletManagerScreen() {
                           color={isEditing ? colors.success : colors.textTertiary}
                         />
                       </TouchableOpacity>
+                      {!isEditing && (
+                        <TouchableOpacity
+                          onPress={() => handleDelete(w)}
+                          style={styles.iconBtn}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons name="trash-outline" size={15} color={colors.error} />
+                        </TouchableOpacity>
+                      )}
                       <Ionicons
                         name={isExpanded ? 'chevron-up' : 'chevron-down'}
                         size={18}
@@ -373,12 +419,12 @@ export default function WalletManagerScreen() {
               </Text>
             </View>
           )}
-        </ScrollView>
 
-        {/* Fixed footer buttons */}
-        {!showImport && (
-          <View style={[styles.footer, { bottom: footerBottom }]}>
-            <View style={{ flexDirection: 'row', gap: spacing.sm }}>
+          {/* Create / Import — part of the normal scroll flow, not a
+              floating overlay, so they can't sit on top of the rename input
+              and you can always scroll down to reach them fully. */}
+          {!showImport && (
+            <View style={styles.actionsRow}>
               <View style={{ flex: 1 }}>
                 <Button
                   label="Create Wallet"
@@ -394,8 +440,8 @@ export default function WalletManagerScreen() {
                 />
               </View>
             </View>
-          </View>
-        )}
+          )}
+        </ScrollView>
       </View>
     </SafeAreaView>
   );
@@ -477,9 +523,8 @@ const styles = StyleSheet.create({
   },
   infoText: { ...typography.xs, color: colors.info, flex: 1, lineHeight: 18 },
 
-  footer: {
-    position: 'absolute', left: spacing.xl, right: spacing.xl,
-    backgroundColor: colors.bg, paddingTop: spacing.md,
-    borderTopWidth: 1, borderTopColor: colors.border,
+  actionsRow: {
+    flexDirection: 'row', gap: spacing.sm,
+    marginTop: spacing.sm, marginBottom: spacing.md,
   },
 });

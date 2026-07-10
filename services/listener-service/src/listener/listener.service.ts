@@ -66,7 +66,7 @@ export class ListenerService implements OnModuleInit {
   private async setupEVMWebsocketListeners() {
     const wsConfigs = [
       { chain:'ethereum', wsUrl: process.env.ETH_WS_RPC,     bridgeAddr: process.env.ETH_BRIDGE_V2_ADDRESS },
-      { chain:'polygon',  wsUrl: process.env.POLYGON_WS_RPC, bridgeAddr: process.env.POLYGONAMOY_BRIDGE_V2_ADDRESS },
+      { chain:'polygon',  wsUrl: process.env.POLYGON_WS_RPC, bridgeAddr: process.env.POLYGON_BRIDGE_V2_ADDRESS },
     ];
 
     for (const cfg of wsConfigs) {
@@ -74,27 +74,38 @@ export class ListenerService implements OnModuleInit {
         this.logger.warn(`Skipping WS listener for ${cfg.chain} — missing WS RPC or bridge address`);
         continue;
       }
+      this.connectBridgeWs(cfg.chain, cfg.wsUrl, cfg.bridgeAddr);
+    }
+  }
 
-      try {
-        const provider = new ethers.WebSocketProvider(cfg.wsUrl);
-        const bridge   = new ethers.Contract(cfg.bridgeAddr, BRIDGE_V2_ABI, provider);
+  // Sets up (or re-sets-up, after a dropped connection) the bridge-events WS
+  // listener for one chain. Split out from setupEVMWebsocketListeners so the
+  // reconnect handler below can call it again on its own.
+  private connectBridgeWs(chain: string, wsUrl: string, bridgeAddr: string) {
+    try {
+      const provider = new ethers.WebSocketProvider(
+        wsUrl,
+        this.EVM_CHAIN_IDS[chain] ? ethers.Network.from(this.EVM_CHAIN_IDS[chain]) : undefined,
+      );
+      this.attachWsResilience(chain, 'bridge', provider, () => this.connectBridgeWs(chain, wsUrl, bridgeAddr));
 
-        bridge.on('TokensLocked', (...args) => this.handleLockEvent(cfg.chain, args));
-        bridge.on('TokensMinted', (...args) => this.handleMintEvent(cfg.chain, args));
-        bridge.on('TokensBurned', (...args) => this.handleBurnEvent(cfg.chain, args));
-        bridge.on('TokensUnlocked', (...args) => this.handleUnlockEvent(cfg.chain, args));
+      const bridge = new ethers.Contract(bridgeAddr, BRIDGE_V2_ABI, provider);
 
-        this.logger.log(`WebSocket listener active for ${cfg.chain} bridge: ${cfg.bridgeAddr}`);
-      } catch (err: any) {
-        this.logger.error(`Failed to set up WS listener for ${cfg.chain}: ${err.message}`);
-      }
+      bridge.on('TokensLocked', (...args) => this.handleLockEvent(chain, args));
+      bridge.on('TokensMinted', (...args) => this.handleMintEvent(chain, args));
+      bridge.on('TokensBurned', (...args) => this.handleBurnEvent(chain, args));
+      bridge.on('TokensUnlocked', (...args) => this.handleUnlockEvent(chain, args));
+
+      this.logger.log(`WebSocket listener active for ${chain} bridge: ${bridgeAddr}`);
+    } catch (err: any) {
+      this.logger.error(`Failed to set up WS listener for ${chain}: ${err.message}`);
+      this.scheduleWsReconnect(chain, 'bridge', () => this.connectBridgeWs(chain, wsUrl, bridgeAddr));
     }
   }
 
   // ─── WebSocket listeners for plain token Transfer events (wallet send/receive) ─
 
   private async setupTokenTransferListeners() {
-    const TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
     const wsConfigs = [
       { chain: 'ethereum', wsUrl: process.env.ETH_WS_RPC },
       { chain: 'polygon',  wsUrl: process.env.POLYGON_WS_RPC },
@@ -105,31 +116,100 @@ export class ListenerService implements OnModuleInit {
         this.logger.warn(`Skipping token WS listener for ${cfg.chain} — missing WS RPC`);
         continue;
       }
-
-      try {
-        const provider = new ethers.WebSocketProvider(cfg.wsUrl);
-
-        for (const symbol of TOKENS) {
-          const tokenAddr = this.getTokenAddress(cfg.chain, symbol);
-          if (!tokenAddr) {
-            this.logger.warn(`Skipping ${cfg.chain}/${symbol} token listener — address not configured`);
-            continue;
-          }
-
-          const contract = new ethers.Contract(tokenAddr, ERC20_TRANSFER_ABI, provider);
-          contract.on('Transfer', (from: string, to: string, value: bigint, event: any) => {
-            const txHash      = event?.log?.transactionHash ?? event?.transactionHash;
-            const blockNumber = event?.log?.blockNumber ?? event?.blockNumber ?? 0;
-            this.handleTokenTransfer(cfg.chain, symbol, from, to, value, txHash, blockNumber)
-              .catch(err => this.logger.error(`handleTokenTransfer error [${cfg.chain}/${symbol}]: ${err.message}`));
-          });
-
-          this.logger.log(`Token WS listener active for ${cfg.chain}/${symbol}: ${tokenAddr}`);
-        }
-      } catch (err: any) {
-        this.logger.error(`Failed to set up token WS listener for ${cfg.chain}: ${err.message}`);
-      }
+      this.connectTokenWs(cfg.chain, cfg.wsUrl);
     }
+  }
+
+  // Sets up (or re-sets-up, after a dropped connection) the token-transfer WS
+  // listener for one chain. Split out so the reconnect handler can call it again.
+  private connectTokenWs(chain: string, wsUrl: string) {
+    const TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
+    try {
+      const provider = new ethers.WebSocketProvider(
+        wsUrl,
+        this.EVM_CHAIN_IDS[chain] ? ethers.Network.from(this.EVM_CHAIN_IDS[chain]) : undefined,
+      );
+      this.attachWsResilience(chain, 'tokens', provider, () => this.connectTokenWs(chain, wsUrl));
+
+      for (const symbol of TOKENS) {
+        const tokenAddr = this.getTokenAddress(chain, symbol);
+        if (!tokenAddr) {
+          this.logger.warn(`Skipping ${chain}/${symbol} token listener — address not configured`);
+          continue;
+        }
+
+        const contract = new ethers.Contract(tokenAddr, ERC20_TRANSFER_ABI, provider);
+        contract.on('Transfer', (from: string, to: string, value: bigint, event: any) => {
+          const txHash      = event?.log?.transactionHash ?? event?.transactionHash;
+          const blockNumber = event?.log?.blockNumber ?? event?.blockNumber ?? 0;
+          this.handleTokenTransfer(chain, symbol, from, to, value, txHash, blockNumber)
+            .catch(err => this.logger.error(`handleTokenTransfer error [${chain}/${symbol}]: ${err.message}`));
+        });
+
+        this.logger.log(`Token WS listener active for ${chain}/${symbol}: ${tokenAddr}`);
+      }
+    } catch (err: any) {
+      this.logger.error(`Failed to set up token WS listener for ${chain}: ${err.message}`);
+      this.scheduleWsReconnect(chain, 'tokens', () => this.connectTokenWs(chain, wsUrl));
+    }
+  }
+
+  // ─── WebSocket resilience ──────────────────────────────────────────────────
+  //
+  // ethers' WebSocketProvider wraps a raw `ws` socket under the hood. If that
+  // socket fails during the initial connection (bad DNS, connection refused,
+  // etc.) it emits its own 'error' event — and if nothing is listening for
+  // 'error' on that raw socket at that moment, Node treats it as an
+  // UNHANDLED exception and kills the entire process. That's exactly what
+  // happened here: a one-off DNS hiccup for sepolia.infura.io took down the
+  // whole listener service, not just the ETH WS connection.
+  //
+  // `provider.websocket` exposes that raw socket. We grab it immediately
+  // after construction (synchronously, before any async DNS/network failure
+  // can fire) and attach our own 'error'/'close' handlers so a transient
+  // network blip is logged and retried instead of crashing the process.
+  // Realtime WS listening is a bonus on top of the HTTPS polling fallback
+  // above anyway, so it's safe to just log, back off, and retry.
+
+  private wsReconnectAttempts: Record<string, number> = {};
+
+  private attachWsResilience(
+    chain: string,
+    label: string,
+    provider: ethers.WebSocketProvider,
+    reconnect: () => void,
+  ) {
+    const socket: any = (provider as any).websocket;
+    if (!socket || typeof socket.on !== 'function') return;
+
+    socket.on('error', (err: any) => {
+      this.logger.warn(`[${chain}] ${label} WebSocket error (will retry): ${err?.message ?? err}`);
+    });
+    socket.on('close', () => {
+      this.logger.warn(`[${chain}] ${label} WebSocket closed — scheduling reconnect`);
+      this.scheduleWsReconnect(chain, label, reconnect);
+    });
+    socket.once('open', () => {
+      this.wsReconnectAttempts[`${chain}:${label}`] = 0;
+    });
+  }
+
+  private scheduleWsReconnect(chain: string, label: string, reconnect: () => void) {
+    const key = `${chain}:${label}`;
+    const attempt = (this.wsReconnectAttempts[key] ?? 0) + 1;
+    this.wsReconnectAttempts[key] = attempt;
+
+    if (attempt > 10) {
+      this.logger.error(
+        `[${chain}] ${label}: giving up on WebSocket reconnects after ${attempt} attempts — ` +
+        `relying on HTTPS polling only for this chain until the app restarts.`,
+      );
+      return;
+    }
+
+    const delay = Math.min(30000, 1000 * 2 ** attempt); // capped exponential backoff
+    this.logger.debug(`[${chain}] ${label}: reconnecting WebSocket in ${delay}ms (attempt ${attempt}/10)`);
+    setTimeout(reconnect, delay);
   }
 
 // ─── Shared handler — confirms sends, records receives, for any chain/token ───
@@ -139,45 +219,43 @@ export class ListenerService implements OnModuleInit {
     value: bigint, txHash: string, blockNumber: number,
   ) {
     if (!txHash) return;
-
-    const cacheKey = `token:transfer:${chain}:${txHash}:${symbol}`;
+ 
+    const cacheKey = `token:transfer:${chain}:${txHash.toLowerCase()}:${symbol}`;
     if (await this.redis.exists(cacheKey)) return;
     await this.redis.set(cacheKey, '1', 86400);
-
-    const amount = ethers.formatUnits(value, 6);
-
-    // Normalize addresses — EVM addresses to lowercase, TRON stays base58
+ 
+    const amount   = ethers.formatUnits(value, 6);
     const fromNorm = chain === 'tron' ? this.normalizeTronAddress(from) : from.toLowerCase();
     const toNorm   = chain === 'tron' ? this.normalizeTronAddress(to)   : to.toLowerCase();
-
-    // Side 1 — confirm the PENDING SEND row for the sender
-    // Match by txHash + status PENDING (the row was created by wallet.service sendToken)
+    // Normalize txHash to lowercase for consistent DB matching
+    const txHashNorm = txHash.toLowerCase();
+ 
+    // Confirm PENDING SEND — match txHash case-insensitively
     const updated = await this.prisma.transaction.updateMany({
-      where: { txHash, status: 'PENDING' },
-      data:  { status: 'CONFIRMED', confirmedAt: new Date(), blockNumber: BigInt(blockNumber) },
+      where: {
+        txHash:  { equals: txHashNorm, mode: 'insensitive' },
+        status:  'PENDING',
+      },
+      data: { status: 'CONFIRMED', confirmedAt: new Date(), blockNumber: BigInt(blockNumber) },
     });
     if (updated.count > 0) {
-      this.logger.log(`[${chain}] Confirmed ${symbol} SEND tx ${txHash} (${amount})`);
+      this.logger.log(`[${chain}] Confirmed ${symbol} SEND tx ${txHashNorm} (${amount})`);
     }
-
-    // Side 2 — create RECEIVE row for the recipient wallet if it belongs to a user
-    // Use case-insensitive address match (mode: 'insensitive') for EVM chains
+ 
+    // Create RECEIVE row for recipient if they're one of our users
     const wallet = chain === 'tron'
       ? await this.prisma.wallet.findFirst({ where: { address: toNorm, chain } })
       : await this.prisma.wallet.findFirst({
-          where: {
-            address: { equals: toNorm, mode: 'insensitive' },
-            chain,
-          },
+          where: { address: { equals: toNorm, mode: 'insensitive' }, chain },
         });
-
-    if (!wallet) return; // recipient is not one of our users — nothing to record
-
+ 
+    if (!wallet) return;
+ 
     try {
       await this.prisma.transaction.create({
         data: {
           walletId:    wallet.id,
-          txHash,
+          txHash:      txHashNorm,
           chain,
           type:        'RECEIVE',
           amount,
@@ -189,16 +267,14 @@ export class ListenerService implements OnModuleInit {
           blockNumber: BigInt(blockNumber),
         },
       });
-      this.logger.log(`[${chain}] Recorded RECEIVE ${symbol} ${txHash} → wallet ${wallet.id} (user ${wallet.userId})`);
+      this.logger.log(`[${chain}] Recorded RECEIVE ${symbol} ${txHashNorm} → wallet ${wallet.id}`);
     } catch (err: any) {
-      // @@unique([walletId, txHash]) — duplicate event delivery hits this; safe to ignore
       if (!err.message?.includes('Unique constraint')) {
-        this.logger.error(`Failed to record RECEIVE ${txHash}: ${err.message}`);
+        this.logger.error(`Failed to record RECEIVE ${txHashNorm}: ${err.message}`);
       }
     }
   }
 
-  
   // ─── Polling fallback — runs for ALL EVM chains, not just BSC ─────────────────
   //
   // WS subscriptions (setupTokenTransferListeners) are fast when they work, but
@@ -208,65 +284,224 @@ export class ListenerService implements OnModuleInit {
   // is far more reliable and easy to debug, so it now runs for every EVM chain
   // as the primary confirmation path; WS is just a low-latency bonus on top.
 
-  @Cron('*/60 * * * * *') // every 60 seconds
-  async pollEvmTokenTransfersAll() {
-    const chains: Array<[string, string | undefined]> = [
-      ['ethereum', process.env.ETH_RPC],
-      ['polygon',  process.env.POLYGON_RPC],
-      ['bsc',      process.env.BSC_RPC],
-    ];
+  // Guards against overlapping runs: if a poll cycle is still working through
+  // a rate-limited chain when the next 60s tick fires, NestJS's @Cron does
+  // NOT wait for the previous run to finish — it just fires again. Two (or
+  // three) concurrent pollers hammering the same already-rate-limited BSC
+  // endpoint was exactly what produced interleaved, ever-shrinking window
+  // logs that never made progress. This flag makes a tick that finds a
+  // previous one still running skip itself entirely instead of piling on.
+  private evmPollBusy = false;
 
-    for (const [chain, rpcUrl] of chains) {
-      if (!rpcUrl) {
-        this.logger.warn(`Skipping token polling for ${chain} — no RPC URL configured`);
-        continue;
+  @Cron('0 */3 * * * *') // every 3 minutes
+  async pollEvmTokenTransfersAll() {
+    if (this.evmPollBusy) {
+      this.logger.debug('Previous EVM token poll still running — skipping this tick');
+      return;
+    }
+    this.evmPollBusy = true;
+    try {
+      const chains: Array<[string, string | undefined]> = [
+        ['ethereum', process.env.ETH_RPC],
+        ['polygon',  process.env.POLYGON_RPC],
+        ['bsc',      process.env.BSC_RPC],
+      ];
+
+      for (const [chain, rpcUrl] of chains) {
+        if (!rpcUrl) {
+          this.logger.warn(`Skipping token polling for ${chain} — no RPC URL configured`);
+          continue;
+        }
+        try {
+          await new Promise(r => setTimeout(r, 3000));
+          await this.pollEvmTokenTransfers(chain, rpcUrl);
+        } catch (err: any) {
+          this.logger.error(`${chain} token polling error: ${err.message}`);
+        }
       }
+    } finally {
+      this.evmPollBusy = false;
+    }
+  }
+
+  // How many blocks to request per eth_getLogs call. Just a starting guess
+  // for large catch-up ranges — getLogsWithRetry() below discovers each
+  // chain's REAL cap on the fly (see discoveredMaxRange) whenever a node
+  // rejects a request as too wide, so this doesn't need to be exact.
+  private readonly MAX_LOG_RANGE: Record<string, number> = {
+    bsc:      300,
+    ethereum: 400,
+    polygon:  400,
+  };
+
+  // Once a chain tells us its actual eth_getLogs range cap (see
+  // isBlockRangeError below), we remember it here so every subsequent
+  // chunk — this cycle and future ones — starts at a size that's already
+  // known to work, instead of re-discovering it by trial and error every
+  // single poll.
+  private discoveredMaxRange: Record<string, number> = {};
+
+  // Pause between eth_getLogs calls on the same chain within one poll cycle.
+  private readonly CHAIN_POLL_DELAY: Record<string, number> = {
+    bsc: 800,
+  };
+
+  private sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private isRateLimitError(err: any): boolean {
+    const code = err?.error?.code ?? err?.code;
+    const msg  = String(err?.error?.message ?? err?.shortMessage ?? err?.message ?? '');
+    return code === -32005 || /limit exceeded|too many requests|rate limit/i.test(msg);
+  }
+
+  // Distinct from a rate limit: this is the RPC node stating a hard,
+  // deterministic cap on how many blocks one eth_getLogs call may span
+  // (Polygon Amoy's public RPC does this — e.g. "block range exceeds
+  // configured limit"). Unlike a frequency-based rate limit, shrinking the
+  // window is exactly the right response here, and it's safe to retry
+  // immediately since it isn't a "slow down" signal.
+  private isBlockRangeError(err: any): boolean {
+    const code = err?.error?.code ?? err?.code;
+    const msg  = String(err?.error?.message ?? err?.shortMessage ?? err?.message ?? '');
+    return code === -32000 && /block range|range exceeds|range limit|too many blocks|query returned more than/i.test(msg)
+      || /block range exceeds|exceeds configured limit/i.test(msg);
+  }
+
+  // One eth_getLogs call for a block window, handling two distinct failure
+  // modes differently:
+  //  - Rate limit (transient, frequency-based): retry the SAME window with
+  //    flat backoff delay. Shrinking wouldn't help — a single block was
+  //    rate-limited just as often as a 20-block one on BSC, so the fix is
+  //    to slow down, not send more (smaller) requests.
+  //  - Block-range-exceeded (deterministic, size-based): the node is
+  //    telling us its actual cap, so halve the window and retry
+  //    immediately — no need to wait. Once it succeeds, remember that
+  //    smaller size for this chain so future chunks don't have to
+  //    rediscover it.
+  // Returns however far it actually got — `reachedBlock` may be less than
+  // the originally requested `toBlock` if the window had to shrink.
+  private async getLogsWithRetry(
+    provider: ethers.JsonRpcProvider,
+    addresses: string[],
+    transferTopic: string,
+    fromBlock: number,
+    toBlock: number,
+    chain: string,
+  ): Promise<{ logs: ethers.Log[]; reachedBlock: number }> {
+    let windowEnd = toBlock;
+    const maxRateLimitAttempts = 3;
+    let rateLimitAttempt = 0;
+
+    for (let shrinkAttempt = 0; shrinkAttempt < 8; shrinkAttempt++) {
       try {
-        await this.pollEvmTokenTransfers(chain, rpcUrl);
+        const logs = await provider.getLogs({ address: addresses, topics: [transferTopic], fromBlock, toBlock: windowEnd });
+        if (windowEnd < toBlock) {
+          this.discoveredMaxRange[chain] = windowEnd - fromBlock + 1;
+          this.logger.debug(`[${chain}] discovered working eth_getLogs range: ${this.discoveredMaxRange[chain]} blocks`);
+        }
+        return { logs, reachedBlock: windowEnd };
       } catch (err: any) {
-        this.logger.error(`${chain} token polling error: ${err.message}`);
+        if (this.isBlockRangeError(err) && windowEnd > fromBlock) {
+          windowEnd = fromBlock + Math.floor((windowEnd - fromBlock) / 2);
+          this.logger.debug(`[${chain}] block range too wide, shrinking to blocks ${fromBlock}-${windowEnd} and retrying`);
+          continue;
+        }
+        if (this.isRateLimitError(err) && rateLimitAttempt < maxRateLimitAttempts - 1) {
+          rateLimitAttempt++;
+          const backoff = 1500 * rateLimitAttempt;
+          this.logger.debug(`[${chain}] eth_getLogs rate-limited, retrying blocks ${fromBlock}-${windowEnd} in ${backoff}ms (attempt ${rateLimitAttempt}/${maxRateLimitAttempts - 1})`);
+          await this.sleep(backoff);
+          continue;
+        }
+        throw err;
       }
     }
+    throw new Error(`[${chain}] could not find a working eth_getLogs range starting from block ${fromBlock}`);
   }
 
   private async pollEvmTokenTransfers(chain: string, rpcUrl: string) {
     if (!rpcUrl) return;
     const TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const provider = this.getProvider(chain);
 
     const currentBlock = await provider.getBlockNumber();
     const key          = `${chain}_tokens`;
     const fromBlock    = this.lastBlocks[key] ?? currentBlock - 20;
     if (currentBlock <= fromBlock) return;
 
+    // Collect every configured token address for this chain so we issue ONE
+    // eth_getLogs call per block-window instead of one per token. Doing 3
+    // separate calls every 60s (x3 chains) was exactly what tripped "Too
+    // Many Requests" / "triggered rate limit" on Infura's free tier and the
+    // public BSC testnet node — a single multi-address query covers the
+    // same ground for a third of the request volume.
+    const addrToSymbol: Record<string, typeof TOKENS[number]> = {};
     for (const symbol of TOKENS) {
-      const tokenAddr = this.getTokenAddress(chain, symbol);
-      if (!tokenAddr) {
+      const addr = this.getTokenAddress(chain, symbol);
+      if (!addr) {
         this.logger.warn(`Skipping ${chain}/${symbol} poll — token address not configured`);
         continue;
       }
+      addrToSymbol[addr.toLowerCase()] = symbol;
+    }
+
+    const addresses = Object.keys(addrToSymbol);
+    if (addresses.length === 0) { this.lastBlocks[key] = currentBlock; return; }
+
+    const iface         = new ethers.Interface(ERC20_TRANSFER_ABI);
+    const transferTopic = iface.getEvent('Transfer')!.topicHash;
+    // Prefer a range this chain has already proven it accepts, if we've
+    // discovered one; otherwise fall back to the initial guess.
+    const maxRange       = this.discoveredMaxRange[chain] ?? this.MAX_LOG_RANGE[chain] ?? 200;
+    const pollDelay       = this.CHAIN_POLL_DELAY[chain] ?? 300;
+
+    // Walk the block range in windows. `caughtUpTo` only advances past a
+    // window once that window's query actually succeeds — marking the
+    // ENTIRE range as processed even when the call failed would silently
+    // drop any transfers in that window forever. A failed/rate-limited
+    // window is left for the next poll cycle to retry.
+    let windowStart = fromBlock + 1;
+    let caughtUpTo  = fromBlock;
+
+    while (windowStart <= currentBlock) {
+      const windowEnd = Math.min(windowStart + maxRange - 1, currentBlock);
 
       try {
-        const contract = new ethers.Contract(tokenAddr, ERC20_TRANSFER_ABI, provider);
-        const events   = await contract.queryFilter(contract.filters.Transfer(), fromBlock + 1, currentBlock);
+        const { logs, reachedBlock } = await this.getLogsWithRetry(provider, addresses, transferTopic, windowStart, windowEnd, chain);
 
-        if (events.length > 0) {
-          this.logger.debug(`[${chain}] Found ${events.length} ${symbol} Transfer event(s) in blocks ${fromBlock + 1}-${currentBlock}`);
+        if (logs.length > 0) {
+          this.logger.debug(`[${chain}] Found ${logs.length} token Transfer event(s) in blocks ${windowStart}-${reachedBlock}`);
         }
 
-        for (const evt of events) {
-          const e = evt as ethers.EventLog;
-          this.logger.debug(`[${chain}] ${symbol} Transfer ${e.transactionHash}: ${e.args.from} → ${e.args.to} (${e.args.value})`);
-          await this.handleTokenTransfer(
-            chain, symbol, e.args.from, e.args.to, e.args.value, e.transactionHash, e.blockNumber,
-          );
+        for (const log of logs) {
+          const symbol = addrToSymbol[log.address.toLowerCase()];
+          if (!symbol) continue;
+          try {
+            const parsed = iface.parseLog(log);
+            if (!parsed) continue;
+            const [from, to, value] = parsed.args as unknown as [string, string, bigint];
+            this.logger.debug(`[${chain}] ${symbol} Transfer ${log.transactionHash}: ${from} → ${to} (${value})`);
+            await this.handleTokenTransfer(chain, symbol, from, to, value, log.transactionHash, log.blockNumber);
+          } catch (err: any) {
+            this.logger.warn(`Failed to parse/handle ${chain} log ${log.transactionHash}: ${err.message}`);
+          }
         }
+
+        caughtUpTo  = reachedBlock;
+        windowStart = reachedBlock + 1;
+
+        // Brief pause between chunked calls so we don't immediately re-hit
+        // the same per-second rate limit that just got us here.
+        if (windowStart <= currentBlock) await this.sleep(pollDelay);
       } catch (err: any) {
-        this.logger.warn(`Token poll failed [${chain}/${symbol}]: ${err.message}`);
+        this.logger.warn(`Token poll failed [${chain}] blocks ${windowStart}-${windowEnd}: ${err.message}`);
+        break; // stop for this cycle — remaining blocks retried next time
       }
     }
 
-    this.lastBlocks[key] = currentBlock;
+    this.lastBlocks[key] = caughtUpTo;
   }
 
   // ─── Polling fallback — TRON (no native WSS event subscriptions) ──────────────
@@ -397,23 +632,45 @@ export class ListenerService implements OnModuleInit {
 
   // ─── Polling-based listeners (TRON + fallback for chains without WSS) ─────────
 
+  // Guards a startup network call so a prolonged outage can't hang
+  // onModuleInit() (and therefore the whole app's readiness) indefinitely —
+  // give up after a bounded wait and let the regular pollers catch up once
+  // connectivity returns, same as everywhere else in this file.
+  private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      promise.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e); },
+      );
+    });
+  }
+
   private async initLastBlocks() {
     // TRON
     try {
       const tronWeb = new TronWeb({ fullHost: process.env.TRON_RPC! });
-      const block   = await tronWeb.trx.getCurrentBlock();
+      const block   = await this.withTimeout(tronWeb.trx.getCurrentBlock(), 8000, 'TRON initial block fetch') as any;
       this.lastBlocks['tron'] = block.block_header.raw_data.number;
     } catch (err: any) {
-      this.logger.warn(`Could not init TRON last block: ${err.message}`);
+      this.logger.warn(`Could not init TRON last block (starting from 0, will catch up via polling): ${err.message}`);
       this.lastBlocks['tron'] = 0;
     }
 
-    // BSC (HTTP polling fallback — no WSS configured)
+    // BSC (HTTP polling fallback — no WSS configured).
+    // This used to construct its own bare `new ethers.JsonRpcProvider(...)`
+    // instead of going through the shared getProvider() cache — meaning it
+    // had no `staticNetwork` set, so on a DNS/network outage ethers fell
+    // into its own built-in "failed to detect network, retry in 1s" loop,
+    // spamming logs and (worse) potentially hanging onModuleInit() forever
+    // since nothing bounded how long that internal retry could run. Routing
+    // through getProvider() fixes the spam; withTimeout() below guarantees
+    // startup can't hang even if something else fails to fail fast.
     try {
-      const provider = new ethers.JsonRpcProvider(process.env.BSC_RPC!);
-      this.lastBlocks['bsc'] = await provider.getBlockNumber();
+      const provider = this.getProvider('bsc');
+      this.lastBlocks['bsc'] = await this.withTimeout(provider.getBlockNumber(), 8000, 'BSC initial block fetch');
     } catch (err: any) {
-      this.logger.warn(`Could not init BSC last block: ${err.message}`);
+      this.logger.warn(`Could not init BSC last block (starting from 0, will catch up via polling): ${err.message}`);
       this.lastBlocks['bsc'] = 0;
     }
   }
@@ -583,13 +840,50 @@ export class ListenerService implements OnModuleInit {
 
   // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+  // Chain IDs for the EVM testnets we support — passed explicitly to
+  // JsonRpcProvider so it never issues its own `eth_chainId` auto-detect
+  // call. Free/public RPC endpoints (Infura free tier, public BSC testnet
+  // nodes) batch that detection call together with whatever real request
+  // triggered it; when the endpoint then rate-limits or rejects part of
+  // that batch, ethers can't cleanly split the mixed success/error array
+  // and throws the confusing "missing response for request" BAD_DATA
+  // error seen in the logs — even though only ONE of the batched calls
+  // actually failed.
+  private readonly EVM_CHAIN_IDS: Record<string, number> = {
+    ethereum: 11155111,
+    bsc:      97,
+    polygon:  80002,
+  };
+
+  private evmProviders: Record<string, ethers.JsonRpcProvider> = {};
+
   private getProvider(chain: string): ethers.JsonRpcProvider {
-    const map: Record<string,string> = {
-      ethereum: process.env.ETH_RPC!,
-      bsc:      process.env.BSC_RPC!,
-      polygon:  process.env.POLYGON_RPC!,
+    if (this.evmProviders[chain]) return this.evmProviders[chain];
+
+    const map: Record<string, string | undefined> = {
+      ethereum: process.env.ETH_RPC,
+      bsc:      process.env.BSC_RPC,
+      polygon:  process.env.POLYGON_RPC,
     };
-    return new ethers.JsonRpcProvider(map[chain]);
+    const url = map[chain];
+    if (!url) throw new Error(`No RPC configured for ${chain}`);
+
+    const chainId = this.EVM_CHAIN_IDS[chain];
+    const provider = new ethers.JsonRpcProvider(
+      url,
+      chainId ? ethers.Network.from(chainId) : undefined,
+      {
+        staticNetwork: chainId ? ethers.Network.from(chainId) : undefined,
+        // Disable request batching — one JSON-RPC call per HTTP request.
+        // Public/free-tier RPCs (Infura free tier, public BSC dataseed)
+        // rate-limit or outright reject batched arrays of calls; sending
+        // requests one at a time avoids the "Too Many Requests" /
+        // "triggered rate limit" errors entirely.
+        batchMaxCount: 1,
+      },
+    );
+    this.evmProviders[chain] = provider;
+    return provider;
   }
 
   private normalizeTronAddress(address?: string): string {

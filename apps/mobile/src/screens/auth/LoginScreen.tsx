@@ -30,11 +30,24 @@ export default function LoginScreen() {
     if (!email || !password) { setError('Please fill in all fields'); return; }
     setLoading(true);
     try {
-      await dispatch(loginUser({ email, password, totpCode: totpCode || undefined })).unwrap();
+      await dispatch(loginUser({
+        email: email.trim().toLowerCase(),
+        password,
+        totpCode: totpCode || undefined,
+      })).unwrap();
     } catch (err: any) {
       const msg = err?.message || 'Login failed';
-      if (msg.toLowerCase().includes('2fa')) setNeeds2FA(true);
-      else setError(msg);
+      const lower = msg.toLowerCase();
+      if (lower.includes('2fa')) {
+        setNeeds2FA(true);
+        // "2FA code required" just means the field should appear — that's
+        // not an error the person did anything wrong. But "Invalid 2FA
+        // code" means they typed a wrong/expired one, so tell them so they
+        // don't just sit there wondering why nothing happened.
+        if (!lower.includes('required')) setError(msg);
+      } else {
+        setError(msg);
+      }
     } finally { setLoading(false); }
   };
 

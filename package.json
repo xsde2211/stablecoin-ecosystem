@@ -4,12 +4,12 @@
   "private": true,
   "scripts": {
     "build:packages": "pnpm --filter './packages/*' build",
-    "dev":          "node tools/scripts/dev.cjs",
-    "dev:infra":    "docker compose up -d postgres redis kafka zookeeper",
-    "dev:stop":     "docker compose down",
-    "dev:all":   "docker compose up -d postgres redis kafka zookeeper && node tools/scripts/dev.cjs",
-    "db:migrate":"pnpm --filter @ecosystem/config prisma:migrate",
-    "db:generate":"pnpm --filter @ecosystem/config prisma:generate",
+    "dev": "node tools/scripts/dev.cjs",
+    "dev:infra": "docker compose up -d postgres redis kafka zookeeper",
+    "dev:stop": "docker compose down",
+    "dev:all": "docker compose up -d postgres redis kafka zookeeper && node tools/scripts/dev.cjs",
+    "db:migrate": "pnpm --filter @ecosystem/config prisma:migrate",
+    "db:generate": "pnpm --filter @ecosystem/config prisma:generate",
     "db:studio": "pnpm --filter @ecosystem/config prisma:studio"
   },
   "devEngines": {
@@ -25,6 +25,9 @@
   },
   "dependencies": {
     "@prisma/client": "6.19.3",
-    "prisma": "6.19.3"
+    "dotenv": "^16.6.1",
+    "ethers": "^6.16.0",
+    "prisma": "6.19.3",
+    "tronweb": "^6.3.0"
   }
 }

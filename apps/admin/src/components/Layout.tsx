@@ -6,17 +6,23 @@ const NAV = [
   { to: '/users', label: 'Users', icon: UsersIcon },
   { to: '/transactions', label: 'Transactions', icon: TxIcon },
   { to: '/bridge-transfers', label: 'Bridge Transfers', icon: BridgeIcon },
+  { to: '/treasury', label: 'Treasury', icon: TreasuryIcon },
+  { to: '/mint-burn', label: 'Mint / Burn', icon: MintBurnIcon },
+  { to: '/roles', label: 'Roles & Signers', icon: RolesIcon },
+  { to: '/role-management', label: 'Role Management', icon: RoleManagementIcon, superAdminOnly: true },
   { to: '/audit-logs', label: 'Audit Logs', icon: LogIcon },
 ];
 
 export function Layout() {
-  const { user, logout } = useAuth();
+  const { user, logout, isSuperAdmin } = useAuth();
   const navigate = useNavigate();
 
   const handleLogout = () => {
     logout();
     navigate('/login');
   };
+
+  const visibleNav = NAV.filter((item) => !item.superAdminOnly || isSuperAdmin);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#f6f7f9]">
@@ -33,7 +39,7 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 space-y-1 px-3">
-          {NAV.map((item) => (
+          {visibleNav.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -116,6 +122,38 @@ function LogIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
     <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
       <path d="M6 3h9l3 3v15H6z" /><path d="M9 10h6M9 14h6M9 18h4" />
+    </svg>
+  );
+}
+function TreasuryIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <rect x="3" y="8" width="18" height="12" rx="1.5" />
+      <path d="M3 8l9-5 9 5M8 12v4M12 12v4M16 12v4" />
+    </svg>
+  );
+}
+function MintBurnIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <circle cx="8" cy="8" r="5" /><path d="M13 13c3 .5 5 2.5 5 5.5M8 5v6M5 8h6" />
+      <path d="M19 15l1.5 1.5L19 18M22 16.5h-4.5" />
+    </svg>
+  );
+}
+function RolesIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M12 2l7 3v6c0 5-3 8.5-7 11-4-2.5-7-6-7-11V5z" />
+      <path d="M9 12l2 2 4-4" />
+    </svg>
+  );
+}
+function RoleManagementIcon(props: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M12 15a4 4 0 100-8 4 4 0 000 8z" />
+      <path d="M19.4 13a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V19a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 13a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 7a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 008.9 2.6a1.65 1.65 0 001-1.51V1a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 7a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
     </svg>
   );
 }

@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   Alert, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useNavigation, useRoute } from '@react-navigation/native';
-import { useSelector } from 'react-redux';
+import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
+import { useDispatch, useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import { Header }    from '../../components/ui/Header';
 import { Button }    from '../../components/ui/Button';
@@ -14,7 +14,8 @@ import { TokenIcon }  from '../../components/ui/TokenIcon';
 import { ChainBadge } from '../../components/ui/ChainBadge';
 import { colors, typography, spacing, radius } from '../../theme';
 import { api } from '../../services/api';
-import type { RootState } from '../../store';
+import { fetchBalances } from '../../store/slices/walletSlice';
+import type { AppDispatch, RootState } from '../../store';
 
 const TOKENS = ['INRX', 'EGOLD', 'ESLVR'];
 const CHAINS  = ['tron', 'ethereum', 'bsc', 'polygon'];
@@ -25,10 +26,19 @@ export default function SendScreen() {
   const navigation = useNavigation<any>();
   const route      = useRoute<any>();
   const insets     = useSafeAreaInsets();
+  const dispatch   = useDispatch<AppDispatch>();
   // Screens inside a tab need to clear the tab bar too
   const footerPb   = insets.bottom > 0 ? insets.bottom + 8 : TAB_H + 8;
 
-  const { balances } = useSelector((s: RootState) => s.wallet);
+  const { balances, activeWalletIndex } = useSelector((s: RootState) => s.wallet);
+
+  // Keep balances fresh for whichever wallet is currently active — refetch
+  // on focus and whenever the active wallet changes.
+  useFocusEffect(
+    useCallback(() => {
+      dispatch(fetchBalances(activeWalletIndex));
+    }, [dispatch, activeWalletIndex])
+  );
 
   const [token,     setToken]     = useState(route.params?.token ?? 'INRX');
   const [chain,     setChain]     = useState('tron');
@@ -44,7 +54,7 @@ export default function SendScreen() {
   const handleSend = async () => {
     setLoading(true);
     try {
-      const res = await api.sendToken({ token, chain, toAddress, amount });
+      const res = await api.sendToken({ token, chain, toAddress, amount, walletIndex: activeWalletIndex });
       setTxResult(res);
       setStep('success');
     } catch (err: any) {

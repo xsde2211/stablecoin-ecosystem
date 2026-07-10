@@ -20,7 +20,6 @@ import type { AppDispatch }     from '../../store';
 const K_BIO   = '@pref_biometric';
 const K_PUSH  = '@pref_push';
 const K_EMAIL = '@pref_email';
-const K_WALLETS = '@wallets_meta';
 
 const KYC_ROUTE = 'Kyc';
 
@@ -59,9 +58,11 @@ export default function SettingsScreen() {
   }, []);
 
   const loadWalletCount = useCallback(async () => {
-    const raw = await AsyncStorage.getItem(K_WALLETS);
-    const metas = raw ? JSON.parse(raw) : [];
-    setWalletCount(metas.length || 1);
+  try {
+    const list = await api.getWallets();
+    setWalletCount(Array.isArray(list) ? list.length : 1);
+  } catch {
+  }
   }, []);
 
   useFocusEffect(useCallback(() => { loadKyc(); loadWalletCount(); }, [loadKyc, loadWalletCount]));

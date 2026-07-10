@@ -129,6 +129,7 @@ export class AuthService {
         riskScore:    true,
         twoFaEnabled: true,
         isActive:     true,
+        signerIndex:  true,
         createdAt:    true,
         updatedAt:    true,
       },

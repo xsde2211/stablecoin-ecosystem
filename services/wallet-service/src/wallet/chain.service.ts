@@ -6,8 +6,6 @@ import { Connection, PublicKey } from '@solana/web3.js';
 const ERC20_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
   'function transfer(address to, uint256 amount) returns (bool)',
-  'function decimals() view returns (uint8)',
-  'function symbol() view returns (string)',
 ];
 
 const TRC20_ABI = [
@@ -17,6 +15,18 @@ const TRC20_ABI = [
     name:'transfer', outputs:[{name:'',type:'bool'}], type:'function' },
 ];
 
+// Every token in this system (INRX, EGOLD, ESLVR) is deployed with 6
+// decimals on every chain — confirmed by stablecoin-service, bridge-service,
+// and this file's own sendEVMToken/sendTRONToken, all of which already
+// hardcode 6 rather than reading it on-chain. getBalance() and
+// sendEVMToken() were the two places still calling contract.decimals() on
+// every single request — that's an extra `eth_call` per token, per balance
+// check, for a value that never changes. With 3 tokens × up to 4 EVM
+// chains, a single "get all balances" request could fire 24 RPC calls
+// instead of 12, which is very easy to trip Infura's free-tier rate limit
+// (the "-32005 Too Many Requests" you were seeing).
+const TOKEN_DECIMALS = 6;
+
 @Injectable()
 export class ChainService {
   private readonly logger = new Logger(ChainService.name);
@@ -25,6 +35,12 @@ export class ChainService {
   private readonly bscProvider:     ethers.JsonRpcProvider;
   private readonly polygonProvider: ethers.JsonRpcProvider;
   private readonly solanaConn:      Connection;
+
+  // Very short-lived in-memory cache so rapid re-renders / near-simultaneous
+  // requests (e.g. Dashboard and TokenDetail both mounting at once) don't
+  // each fire their own full round of RPC calls for the same data.
+  private readonly balanceCache = new Map<string, { value: string; expiresAt: number }>();
+  private readonly CACHE_TTL_MS = 8_000;
 
   constructor() {
     this.ethProvider     = new ethers.JsonRpcProvider(process.env.ETH_RPC!);
@@ -64,18 +80,51 @@ export class ChainService {
   // ─── Balance fetching ────────────────────────────────────────────────────────
 
   async getBalance(chain: string, address: string, tokenAddress: string): Promise<string> {
+    const cacheKey = `${chain}:${address}:${tokenAddress}`;
+    const cached   = this.balanceCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+
     try {
+      let value: string;
       switch (chain) {
-        case 'ethereum': return this.getEVMBalance(this.ethProvider,     address, tokenAddress);
-        case 'bsc':      return this.getEVMBalance(this.bscProvider,     address, tokenAddress);
-        case 'polygon':  return this.getEVMBalance(this.polygonProvider, address, tokenAddress);
-        case 'tron':     return this.getTRONBalance(address, tokenAddress);
-        case 'solana':   return this.getSolanaBalance(address, tokenAddress);
-        default:         return '0';
+        // THE OTHER BUG: these three lines were `return this.getXBalance(...)`
+        // — returning the promise directly instead of awaiting it. A
+        // try/catch can only catch a rejection that happens BEFORE the
+        // function returns; `return somePromise` (no await) hands the
+        // promise straight to the caller, so if it later rejects, this
+        // catch block never runs. That's why a rate-limit error from
+        // Infura was reaching NestJS's global ExceptionsHandler as a raw
+        // uncaught 500 instead of being logged here and turned into '0'.
+        case 'ethereum': value = await this.withRetry(() => this.getEVMBalance(this.ethProvider,     address, tokenAddress)); break;
+        case 'bsc':      value = await this.withRetry(() => this.getEVMBalance(this.bscProvider,     address, tokenAddress)); break;
+        case 'polygon':  value = await this.withRetry(() => this.getEVMBalance(this.polygonProvider, address, tokenAddress)); break;
+        case 'tron':     value = await this.getTRONBalance(address, tokenAddress); break;
+        case 'solana':   value = await this.getSolanaBalance(address, tokenAddress); break;
+        default:         value = '0';
       }
+      this.balanceCache.set(cacheKey, { value, expiresAt: Date.now() + this.CACHE_TTL_MS });
+      return value;
     } catch (err: any) {
       this.logger.error(`Balance fetch failed [${chain}:${address.slice(0,10)}]: ${err.message}`);
       return '0';
+    }
+  }
+
+  // Retries only on rate-limit responses (Infura's -32005, or any "Too Many
+  // Requests" style error) — anything else fails fast and falls through to
+  // getBalance()'s catch block above.
+  private async withRetry<T>(fn: () => Promise<T>, retries = 3, delayMs = 800): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        const isRateLimited =
+          err?.info?.error?.code === -32005 ||
+          err?.error?.code === -32005 ||
+          /too many requests/i.test(err?.message ?? err?.shortMessage ?? '');
+        if (!isRateLimited || attempt >= retries) throw err;
+        await new Promise((r) => setTimeout(r, delayMs * (attempt + 1)));
+      }
     }
   }
 
@@ -85,11 +134,8 @@ export class ChainService {
     token:    string,
   ): Promise<string> {
     const contract = new ethers.Contract(token, ERC20_ABI, provider);
-    const [balance, decimals] = await Promise.all([
-      contract.balanceOf(address),
-      contract.decimals(),
-    ]);
-    return ethers.formatUnits(balance, decimals);
+    const balance  = await contract.balanceOf(address);
+    return ethers.formatUnits(balance, TOKEN_DECIMALS);
   }
 
   private async getTRONBalance(address: string, tokenAddress: string): Promise<string> {
@@ -100,7 +146,6 @@ export class ChainService {
     tronWeb.setAddress(address);
     const contract = await tronWeb.contract(TRC20_ABI, tokenAddress);
     const balance  = await contract.balanceOf(address).call();
-    // All our tokens use 6 decimals
     return (BigInt(balance.toString()) / 1_000_000n).toString();
   }
 
@@ -136,8 +181,7 @@ export class ChainService {
 
     const wallet   = ethers.HDNodeWallet.fromPhrase(mnemonic).connect(provider);
     const contract = new ethers.Contract(tokenAddress, ERC20_ABI, wallet);
-    const decimals = await contract.decimals();
-    const parsed   = ethers.parseUnits(amount, decimals);
+    const parsed   = ethers.parseUnits(amount, TOKEN_DECIMALS);
 
     const tx      = await contract.transfer(toAddress, parsed);
     const receipt = await tx.wait();

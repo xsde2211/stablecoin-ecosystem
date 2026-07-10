@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList,
   TouchableOpacity, RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation, useRoute } from '@react-navigation/native';
+import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
+import { useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import { Header }     from '../../components/ui/Header';
 import { Badge }      from '../../components/ui/Badge';
@@ -13,6 +14,7 @@ import { Skeleton }   from '../../components/ui/Skeleton';
 import { TokenIcon }  from '../../components/ui/TokenIcon';
 import { colors, typography, spacing, radius } from '../../theme';
 import { api } from '../../services/api';
+import type { RootState } from '../../store';
 
 const ALL_TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
 type TokenSymbol = typeof ALL_TOKENS[number];
@@ -20,6 +22,7 @@ type TokenSymbol = typeof ALL_TOKENS[number];
 export default function TransactionsScreen() {
   const navigation = useNavigation<any>();
   const route      = useRoute<any>();
+  const { activeWalletIndex } = useSelector((s: RootState) => s.wallet);
 
   // If navigated from TokenDetail, start with only that token active
   const initialToken: TokenSymbol | undefined = route.params?.filterToken;
@@ -39,16 +42,24 @@ export default function TransactionsScreen() {
 
   const load = useCallback(async (pageNum = 1, append = false) => {
     try {
-      const res  = await api.getTransactions(pageNum, 20);
+      // Pass the active wallet — previously this always fetched wallet 0's
+      // transactions no matter which wallet was selected in the app.
+      const res  = await api.getTransactions(pageNum, 20, activeWalletIndex);
       const data = res.data ?? res.transactions ?? res ?? [];
       const arr  = Array.isArray(data) ? data : [];
       setTransactions(prev => append ? [...prev, ...arr] : arr);
       setHasMore(arr.length === 20);
     } catch {}
     finally { setLoading(false); setRefreshing(false); }
-  }, []);
+  }, [activeWalletIndex]);
 
-  useEffect(() => { load(1); }, [load]);
+  // Reload on focus AND whenever the active wallet changes.
+  useFocusEffect(
+    useCallback(() => {
+      setPage(1);
+      load(1);
+    }, [load])
+  );
 
   const onRefresh = () => { setRefreshing(true); setPage(1); load(1); };
   const loadMore  = () => {

@@ -5,6 +5,14 @@ import { AppModule }                      from './app.module';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+// Transaction.blockNumber is a Prisma BigInt column; JSON.stringify can't
+// serialize BigInt by default. GET /admin/transactions returns these rows
+// directly, so without this, any transaction with a confirmed block crashes
+// the response.
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString();
+};
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const logger = new Logger('AdminService');

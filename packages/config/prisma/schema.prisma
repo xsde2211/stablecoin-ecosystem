@@ -21,6 +21,7 @@ model User {
   isActive     Boolean   @default(true)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
+  signerIndex Int?
 
   wallets         Wallet[]
   kycApplications KycApplication[]
@@ -29,6 +30,7 @@ model User {
   fraudFlags      FraudFlag[]
   merchant        Merchant?
   bridgeTransfers BridgeTransfer[]
+  treasuryRequests TreasuryRequest[]
 
   @@index([email])
   @@index([phone])
@@ -41,6 +43,8 @@ enum UserRole {
   COMPLIANCE
   ADMIN
   SUPER_ADMIN
+  SIGNER
+  GUARDIAN
 }
 
 enum KycStatus {
@@ -70,6 +74,28 @@ model Wallet {
   @@index([userId])
   @@index([userId, walletIndex])
   @@index([address, chain])
+}
+
+model TreasuryRequest {
+  id             String    @id @default(uuid())
+  userId         String
+  chain          String
+  token          String
+  opType         String    // MINT | BURN
+  amount         String
+  reason         String
+  targetAddress  String?
+  status         String    @default("PENDING_REVIEW") // PENDING_REVIEW | PROPOSED | REJECTED
+  treasuryOpId   String?
+  reviewedBy     String?
+  rejectedReason String?
+  createdAt      DateTime  @default(now())
+  reviewedAt     DateTime?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([status])
+  @@index([userId])
 }
 
 model Transaction {

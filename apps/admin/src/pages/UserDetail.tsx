@@ -26,7 +26,7 @@ const ROLE_OPTIONS = [
 export default function UserDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { canManage } = useAuth();
+  const { canManage, isSuperAdmin } = useAuth();
 
   const [user, setUser] = useState<UserDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -42,6 +42,8 @@ export default function UserDetail() {
   const [roleLoading, setRoleLoading] = useState(false);
 
   const [unsuspendLoading, setUnsuspendLoading] = useState(false);
+  const [grantAllLoading, setGrantAllLoading] = useState(false);
+  const [grantAllMessage, setGrantAllMessage] = useState('');
 
   const load = async () => {
     if (!id) return;
@@ -103,6 +105,21 @@ export default function UserDetail() {
     }
   };
 
+  const handleGrantAllRoles = async () => {
+    if (!id) return;
+    setGrantAllLoading(true);
+    setGrantAllMessage('');
+    setActionError('');
+    try {
+      const res: any = await api.grantAllRoles(id);
+      setGrantAllMessage(res?.message ?? 'Started.');
+    } catch (err: any) {
+      setActionError(err?.body?.message ?? 'Could not start granting roles.');
+    } finally {
+      setGrantAllLoading(false);
+    }
+  };
+
   if (loading) return <FullPageSpinner />;
   if (error || !user) {
     return (
@@ -139,11 +156,17 @@ export default function UserDetail() {
             ) : (
               <Button variant="primary" size="sm" loading={unsuspendLoading} onClick={handleUnsuspend}>Unsuspend</Button>
             )}
+            {isSuperAdmin && user.role === 'SUPER_ADMIN' && (
+              <Button variant="secondary" size="sm" loading={grantAllLoading} onClick={handleGrantAllRoles}>
+                Grant all on-chain roles
+              </Button>
+            )}
           </div>
         )}
       </header>
 
       {actionError && <Card className="mb-6 p-4 text-sm text-rose-600 ring-rose-200">{actionError}</Card>}
+      {grantAllMessage && <Card className="mb-6 p-4 text-sm text-teal-700 ring-teal-200">{grantAllMessage}</Card>}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <Card className="p-5">

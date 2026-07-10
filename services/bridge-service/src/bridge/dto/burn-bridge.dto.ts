@@ -1,4 +1,4 @@
-import { IsString, IsIn, IsNotEmpty, IsNumberString } from 'class-validator';
+import { IsString, IsIn, IsNotEmpty, IsNumberString, IsInt, Min, IsOptional } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class BurnBridgeDto {
@@ -22,4 +22,8 @@ export class BurnBridgeDto {
   @IsString()
   @IsNotEmpty()
   srcRecipient: string;
+
+  @ApiProperty({ example: 0, required: false, description: 'Which of the user\'s wallets to burn from (default: 0)' })
+  @IsInt() @Min(0) @IsOptional()
+  walletIndex?: number;
 }

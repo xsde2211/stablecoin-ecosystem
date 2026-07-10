@@ -14,7 +14,6 @@ import {
   deriveAllAddresses,
 } from '@ecosystem/crypto';
 
-// Converts BigInt / Decimal fields to string so JSON.stringify never crashes.
 function serializeTx(tx: any) {
   return {
     ...tx,
@@ -37,8 +36,6 @@ export class WalletService {
     private chain:  ChainService,
   ) {}
 
-  // ─── Helper: next available wallet index for a user ────────────────────────
-
   private async nextWalletIndex(userId: string): Promise<number> {
     const last = await this.prisma.wallet.findFirst({
       where:   { userId },
@@ -46,13 +43,7 @@ export class WalletService {
       select:  { walletIndex: true },
     });
     return (last?.walletIndex ?? -1) + 1;
-  }   
-
-  // ─── Helper: get active walletIndex for a user ─────────────────────────────
-  // Stored as a Redis/DB concept; for simplicity we store in a separate small
-  // table. Since we don't have one, we use the lowest walletIndex that exists.
-  // The frontend stores the active index in AsyncStorage and sends it as a
-  // query param when needed. For the default (no param), we use index 0.
+  }
 
   private async getActiveWalletIndex(userId: string, requestedIndex?: number): Promise<number> {
     const idx = requestedIndex ?? 0;
@@ -60,15 +51,10 @@ export class WalletService {
       where: { userId, walletIndex: idx },
     });
     if (!exists) {
-      // Fall back to index 0
       return 0;
     }
     return idx;
   }
-
-  // ─── Create wallet ───────────────────────────────────────────────────────────
-  // Now supports multiple wallets. Each call creates a new wallet with the next
-  // available walletIndex for that user.
 
   async createWallet(userId: string, label?: string) {
     const walletIndex = await this.nextWalletIndex(userId);
@@ -95,8 +81,6 @@ export class WalletService {
     this.logger.log(`Wallet ${walletIndex} (${walletLabel}) created for user ${userId}`);
     return { walletIndex, label: walletLabel, mnemonic, addresses };
   }
-
-  // ─── Import wallet ───────────────────────────────────────────────────────────
 
   async importWallet(userId: string, mnemonic: string, label?: string) {
     if (!validateMnemonic(mnemonic)) {
@@ -128,16 +112,15 @@ export class WalletService {
   }
 
   // ─── Get all wallets for a user ───────────────────────────────────────────────
-  // Returns one entry per wallet (grouped by walletIndex), not one per chain.
+  // Only active (non-deleted) wallets are returned.
 
   async getWallets(userId: string) {
     const rows = await this.prisma.wallet.findMany({
-      where:   { userId },
+      where:   { userId, isActive: true },
       select:  { walletIndex: true, label: true, chain: true, address: true, createdAt: true },
       orderBy: [{ walletIndex: 'asc' }, { chain: 'asc' }],
     });
 
-    // Group by walletIndex
     const grouped: Record<number, any> = {};
     for (const row of rows) {
       if (!grouped[row.walletIndex]) {
@@ -154,34 +137,57 @@ export class WalletService {
     return Object.values(grouped);
   }
 
-  // ─── Rename a wallet ──────────────────────────────────────────────────────────
-
   async renameWallet(userId: string, walletIndex: number, label: string) {
     const count = await this.prisma.wallet.count({
-      where: { userId, walletIndex },
+      where: { userId, walletIndex, isActive: true },
     });
     if (!count) throw new NotFoundException(`Wallet ${walletIndex} not found`);
 
     await this.prisma.wallet.updateMany({
-      where: { userId, walletIndex },
+      where: { userId, walletIndex, isActive: true },
       data:  { label },
     });
 
     return { walletIndex, label };
   }
 
-  // ─── Get addresses ─────────────────────────────────────────────────────────────
-  // walletIndex defaults to 0 (first wallet). Frontend passes ?walletIndex=N.
+  // ─── Delete a wallet (soft delete) ───────────────────────────────────────────
+  // Keeps rows (and transaction history) around, just hides the wallet from
+  // the person's list and blocks it from being used going forward. Refuses
+  // to delete someone's only remaining wallet — the app always needs at
+  // least one wallet to function.
+
+  async deleteWallet(userId: string, walletIndex: number) {
+    const existing = await this.prisma.wallet.findFirst({
+      where: { userId, walletIndex, isActive: true },
+    });
+    if (!existing) throw new NotFoundException(`Wallet ${walletIndex} not found`);
+
+    const activeCount = await this.prisma.wallet.groupBy({
+      by:    ['walletIndex'],
+      where: { userId, isActive: true },
+    });
+    if (activeCount.length <= 1) {
+      throw new BadRequestException('You must keep at least one wallet.');
+    }
+
+    await this.prisma.wallet.updateMany({
+      where: { userId, walletIndex },
+      data:  { isActive: false },
+    });
+
+    this.logger.log(`Wallet ${walletIndex} deleted for user ${userId}`);
+    return { walletIndex, deleted: true };
+  }
 
   async getAddresses(userId: string, walletIndex = 0) {
     const wallets = await this.prisma.wallet.findMany({
-      where:  { userId, walletIndex },
+      where:  { userId, walletIndex, isActive: true },
       select: { chain: true, address: true },
     });
     if (!wallets.length) {
-      // Fall back to walletIndex 0 if the requested one doesn't exist
       const fallback = await this.prisma.wallet.findMany({
-        where:  { userId, walletIndex: 0 },
+        where:  { userId, walletIndex: 0, isActive: true },
         select: { chain: true, address: true },
       });
       if (!fallback.length) throw new NotFoundException('No wallet found');
@@ -191,12 +197,9 @@ export class WalletService {
     return wallets.reduce((acc, w) => { acc[w.chain] = w.address; return acc; }, {} as Record<string, string>);
   }
 
-  // ─── Get all balances ──────────────────────────────────────────────────────────
-  // walletIndex defaults to 0.
-
   async getAllBalances(userId: string, walletIndex = 0) {
     const wallets = await this.prisma.wallet.findMany({
-      where: { userId, walletIndex },
+      where: { userId, walletIndex, isActive: true },
     });
     if (!wallets.length) throw new NotFoundException('No wallet found');
 
@@ -216,13 +219,10 @@ export class WalletService {
     return results;
   }
 
-  // ─── Send tokens ───────────────────────────────────────────────────────────────
-  // walletIndex specifies which wallet to send from.
-
   async sendToken(userId: string, dto: SendTokenDto & { walletIndex?: number }) {
     const walletIndex  = dto.walletIndex ?? 0;
     const wallet = await this.prisma.wallet.findFirst({
-      where: { userId, chain: dto.chain, walletIndex },
+      where: { userId, chain: dto.chain, walletIndex, isActive: true },
     });
     if (!wallet) throw new NotFoundException(`Wallet ${walletIndex} not found for chain ${dto.chain}`);
 
@@ -256,9 +256,6 @@ export class WalletService {
     return { txHash, status: 'PENDING', walletIndex };
   }
 
-  // ─── Transaction history ────────────────────────────────────────────────────────
-  // walletIndex = undefined means ALL wallets for this user.
-
   async getTransactions(userId: string, page = 1, limit = 20, walletIndex?: number) {
     const walletWhere: any = { userId };
     if (walletIndex !== undefined) walletWhere.walletIndex = walletIndex;
@@ -283,8 +280,6 @@ export class WalletService {
 
     return { data: data.map(serializeTx), total, page, limit };
   }
-
-  // ─── Get single transaction ─────────────────────────────────────────────────────
 
   async getTransaction(userId: string, txId: string) {
     const wallets   = await this.prisma.wallet.findMany({

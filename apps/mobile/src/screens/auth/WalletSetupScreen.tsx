@@ -11,8 +11,8 @@ import { Button } from '../../components/ui/Button';
 import { Card }   from '../../components/ui/Card';
 import { colors, typography, spacing, radius } from '../../theme';
 import { api } from '../../services/api';
-import { setWalletReady } from '../../store/slices/walletSlice';
 import type { AppDispatch } from '../../store';
+import { setWalletReady, switchActiveWallet } from '../../store/slices/walletSlice';
 
 const FOOTER_EXTRA = Platform.OS === 'ios' ? 16 : 8;
 
@@ -49,11 +49,13 @@ export default function WalletSetupScreen() {
   const [selectedWords, setSelectedWords] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [revealed, setRevealed] = useState(false);
+  const [newWalletIndex, setNewWalletIndex] = useState(0);
 
   const handleCreate = async () => {
     setLoading(true);
     try {
       const res = await api.createWallet();
+      setNewWalletIndex(res?.walletIndex ?? 0);
       const words = res.mnemonic.split(' ');
       setMnemonic(words);
       const indices = [...Array(words.length).keys()].sort(() => Math.random() - 0.5).slice(0, 3).sort((a, b) => a - b);
@@ -71,17 +73,21 @@ export default function WalletSetupScreen() {
     }
     setLoading(true);
     try {
-      await api.importWallet({ mnemonic: importPhrase.trim() });
+      const res = await api.importWallet({ mnemonic: importPhrase.trim() });
+      await dispatch(switchActiveWallet(res?.walletIndex ?? 0));
       dispatch(setWalletReady(true));
     } catch (err: any) {
       Alert.alert('Error', err?.response?.data?.message || 'Failed to import wallet');
     } finally { setLoading(false); }
   };
 
-  const handleConfirmComplete = () => {
+  const handleConfirmComplete = async () => {
     const correct = confirmWords.every((cw, i) => selectedWords[i] === cw.word);
     if (!correct) { Alert.alert('Not quite right', 'Please tap the words in the order shown on your backup.'); return; }
+    setLoading(true);
+    await dispatch(switchActiveWallet(newWalletIndex));
     dispatch(setWalletReady(true));
+    setLoading(false);
   };
 
   const copyMnemonic = async () => {
@@ -268,7 +274,7 @@ export default function WalletSetupScreen() {
           </TouchableOpacity>
         </ScrollView>
         <View style={[styles.footer, { paddingBottom: footerPb }]}>
-          <Button label="Confirm" onPress={handleConfirmComplete} disabled={selectedWords.length !== confirmWords.length} />
+          <Button label="Confirm" onPress={handleConfirmComplete} loading={loading} disabled={selectedWords.length !== confirmWords.length} />
         </View>
       </View>
     </SafeAreaView>

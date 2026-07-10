@@ -5,6 +5,7 @@ import { BullModule }     from '@nestjs/bull';
 import { BridgeController } from './bridge.controller';
 import { BridgeService }    from './bridge.service';
 import { BridgeProcessor }  from './bridge.processor';
+import { KmsService }       from './kms.service';
 import { JwtStrategy }      from '../auth/jwt.strategy';
 
 @Module({
@@ -14,6 +15,6 @@ import { JwtStrategy }      from '../auth/jwt.strategy';
     BullModule.registerQueue({ name:'bridge' }),
   ],
   controllers: [BridgeController],
-  providers:   [BridgeService, BridgeProcessor, JwtStrategy],
+  providers:   [BridgeService, BridgeProcessor, KmsService, JwtStrategy],
 })
 export class BridgeModule {}

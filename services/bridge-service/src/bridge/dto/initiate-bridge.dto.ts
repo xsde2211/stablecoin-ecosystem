@@ -1,4 +1,4 @@
-import { IsString, IsIn, IsNotEmpty, IsNumberString } from 'class-validator';
+import { IsString, IsIn, IsNotEmpty, IsNumberString, IsInt, Min, IsOptional } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 const CHAINS = ['tron','ethereum','bsc','polygon'] as const;
@@ -25,4 +25,8 @@ export class InitiateBridgeDto {
   @IsString()
   @IsNotEmpty()
   dstAddress: string;
+
+  @ApiProperty({ example: 0, required: false, description: 'Which of the user\'s wallets to bridge from (default: 0)' })
+  @IsInt() @Min(0) @IsOptional()
+  walletIndex?: number;
 }

@@ -137,7 +137,7 @@ export default function KycScreen() {
   // ── STATUS VIEW ────────────────────────────────────────────────────────────
   if (view === 'status') {
     return (
-      <SafeAreaView style={styles.flex} edges={[]}>
+      <SafeAreaView style={styles.flex} edges={["top"]}>
         <Header title="Identity Verification" />
         <View style={styles.flex}>
           {/* ScrollView with paddingBottom = footer height so content never hides under footer */}

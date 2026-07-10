@@ -38,7 +38,12 @@ export default function RegisterScreen() {
     if (!passwordRules.every(r => r.ok)) { setError('Password does not meet requirements'); return; }
     setLoading(true);
     try {
-      await dispatch(registerUser({ fullName, email, phone: phone || undefined, password })).unwrap();
+      await dispatch(registerUser({
+        fullName,
+        email: email.trim().toLowerCase(),
+        phone: phone || undefined,
+        password,
+      })).unwrap();
     } catch (err: any) {
       setError(err?.message || 'Registration failed');
     } finally { setLoading(false); }

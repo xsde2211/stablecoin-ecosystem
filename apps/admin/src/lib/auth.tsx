@@ -5,15 +5,18 @@ type Me = {
   id: string;
   email: string;
   phone: string | null;
-  role: 'USER' | 'MERCHANT' | 'COMPLIANCE' | 'ADMIN' | 'SUPER_ADMIN';
+  role: 'USER' | 'MERCHANT' | 'COMPLIANCE' | 'ADMIN' | 'SUPER_ADMIN' | 'SIGNER' | 'GUARDIAN';
   kycStatus: string;
   isActive: boolean;
+  signerIndex: number | null;
 };
 
 type AuthState = {
   user: Me | null;
   loading: boolean;
-  canManage: boolean; // can suspend / change roles — ADMIN & SUPER_ADMIN only
+  canManage: boolean;      // can suspend / change roles — ADMIN & SUPER_ADMIN
+  isSuperAdmin: boolean;   // can grant/revoke on-chain roles — SUPER_ADMIN ONLY, not ADMIN, not COMPLIANCE
+  isTreasuryTeam: boolean; // SIGNER or GUARDIAN — sees ONLY the Treasury dashboard, nothing else
   login: (email: string, password: string, totpCode?: string) => Promise<void>;
   logout: () => void;
   refreshMe: () => Promise<void>;
@@ -21,7 +24,10 @@ type AuthState = {
 
 const AuthContext = createContext<AuthState | null>(null);
 
-const ADMIN_ROLES = ['ADMIN', 'SUPER_ADMIN', 'COMPLIANCE'];
+// Anyone who should be able to sign into the admin console at all.
+// Treasury team (SIGNER/GUARDIAN) can log in, but see a completely different,
+// much smaller UI (just the Treasury dashboard) — never the admin features.
+const ALLOWED_ROLES = ['ADMIN', 'SUPER_ADMIN', 'COMPLIANCE', 'SIGNER', 'GUARDIAN'];
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<Me | null>(null);
@@ -62,6 +68,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     user,
     loading,
     canManage: user?.role === 'ADMIN' || user?.role === 'SUPER_ADMIN',
+    isSuperAdmin: user?.role === 'SUPER_ADMIN',
+    isTreasuryTeam: user?.role === 'SIGNER' || user?.role === 'GUARDIAN',
     login: doLogin,
     logout: doLogout,
     refreshMe,
@@ -77,5 +85,5 @@ export function useAuth() {
 }
 
 export function isAdminRole(role?: string) {
-  return !!role && ADMIN_ROLES.includes(role);
+  return !!role && ALLOWED_ROLES.includes(role);
 }

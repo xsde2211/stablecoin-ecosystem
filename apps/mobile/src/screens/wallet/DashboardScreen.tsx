@@ -48,7 +48,7 @@ export default function DashboardScreen() {
   const navigation = useNavigation<any>();
   const dispatch   = useDispatch<AppDispatch>();
   const insets     = useSafeAreaInsets();
-  const { balances, transactions, loading } = useSelector((s: RootState) => s.wallet);
+  const { balances, transactions, loading, activeWalletIndex } = useSelector((s: RootState) => s.wallet);
   const { user }   = useSelector((s: RootState) => s.auth);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -74,10 +74,12 @@ export default function DashboardScreen() {
   const initial = displayName.charAt(0).toUpperCase();
 
   const load = useCallback(() => {
-    dispatch(fetchBalances());
-    dispatch(fetchTransactions({ page: 1, limit: 5 }));
-  }, [dispatch]);
+    dispatch(fetchBalances(activeWalletIndex));
+    dispatch(fetchTransactions({ page: 1, limit: 5, walletIndex: activeWalletIndex }));
+  }, [dispatch, activeWalletIndex]);
 
+  // Refetch both on focus AND whenever the active wallet changes (e.g. the
+  // user switches wallets in WalletManagerScreen and comes back here).
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const onRefresh = async () => {

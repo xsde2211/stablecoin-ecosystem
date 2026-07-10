@@ -9,6 +9,19 @@ export type ServiceName =
   | 'kyc' | 'notification' | 'analytics' | 'fraud'
   | 'listener' | 'admin';
 
+// Routes that submit blockchain transactions and must wait for
+// the RPC broadcast — these need a longer timeout than regular DB calls.
+// wallet/send: EVM tx broadcast can take 60-90s on busy testnet RPCs
+// stablecoin/mint, stablecoin/burn: same reason
+// bridge/*: bridge processor awaits tx submission
+const LONG_TIMEOUT_ROUTES: Array<{ service: ServiceName; pathPrefix: string }> = [
+  { service: 'wallet',     pathPrefix: '/wallet/send'      },
+  { service: 'stablecoin', pathPrefix: '/stablecoin/mint'  },
+  { service: 'stablecoin', pathPrefix: '/stablecoin/burn'  },
+  { service: 'bridge',     pathPrefix: '/bridge/'          },
+  { service: 'treasury',   pathPrefix: '/treasury/execute' },
+];
+
 @Injectable()
 export class ProxyService {
   private readonly logger = new Logger(ProxyService.name);
@@ -32,6 +45,24 @@ export class ProxyService {
 
   constructor(private http: HttpService) {}
 
+  // Default timeout for normal API calls (DB reads/writes)
+  private readonly DEFAULT_TIMEOUT_MS = 45_000;
+
+  // Extended timeout for blockchain transaction routes.
+  // EVM testnet tx broadcast + 1 confirmation can take up to 2 minutes.
+  // We don't wait for confirmation (wallet-service returns on submission),
+  // but the RPC call itself can be slow on free-tier nodes.
+  private readonly BLOCKCHAIN_TIMEOUT_MS = 120_000; // 2 minutes
+
+  private getTimeoutMs(service: ServiceName, path: string): number {
+    for (const route of LONG_TIMEOUT_ROUTES) {
+      if (route.service === service && path.startsWith(route.pathPrefix)) {
+        return this.BLOCKCHAIN_TIMEOUT_MS;
+      }
+    }
+    return this.DEFAULT_TIMEOUT_MS;
+  }
+
   async forward(
     service: ServiceName,
     method:  string,
@@ -40,20 +71,17 @@ export class ProxyService {
     headers: Record<string, string>,
     query:   Record<string, any> = {},
   ): Promise<any> {
-    const baseUrl = this.serviceUrls[service];
-    const url     = `${baseUrl}${path}`;
+    const baseUrl    = this.serviceUrls[service];
+    const url        = `${baseUrl}${path}`;
+    const timeoutMs  = this.getTimeoutMs(service, path);
 
-    // Strip hop-by-hop headers AND cache-conditional headers.
-    // If-None-Match / If-Modified-Since cause the upstream NestJS service
-    // to respond 304 with no body — axios then fails to parse JSON.
-    // Stripping them forces the upstream to always return 200 with full body.
     const {
       host,
       connection,
       'content-length':   cl,
       'accept-encoding':  ae,
-      'if-none-match':    inm,      // ← prevents 304 ETag match
-      'if-modified-since': ims,     // ← prevents 304 Last-Modified match
+      'if-none-match':    inm,
+      'if-modified-since': ims,
       ...forwardHeaders
     } = headers;
 
@@ -64,12 +92,10 @@ export class ProxyService {
         ...forwardHeaders,
         'x-forwarded-from': 'gateway',
         'x-forwarded-host': headers.host ?? '',
-        'Cache-Control':    'no-cache, no-store', // tell upstream not to cache
+        'Cache-Control':    'no-cache, no-store',
         'Pragma':           'no-cache',
       },
       params: query,
-      // Accept any status < 500 so axios doesn't throw on 3xx —
-      // we handle them explicitly below.
       validateStatus: (status) => status < 500,
     };
 
@@ -79,12 +105,9 @@ export class ProxyService {
 
     try {
       const response = await firstValueFrom(
-        this.http.request(config).pipe(timeout(30_000))
+        this.http.request(config).pipe(timeout(timeoutMs))
       );
 
-      // 304 should never reach here after stripping If-None-Match above,
-      // but guard defensively: if we somehow still get one, re-fetch without
-      // any conditional headers (they're already stripped, so this won't loop).
       if (response.status === 304) {
         this.logger.warn(`Upstream returned 304 for [${service}] ${method} ${path} — treating as 502`);
         throw new HttpException(
@@ -95,16 +118,26 @@ export class ProxyService {
 
       return { data: response.data, status: response.status };
     } catch (err: any) {
-      // HttpException re-throw (e.g. our 304 guard above) — pass through
       if (err instanceof HttpException) throw err;
 
-      const status = err?.response?.status ?? HttpStatus.BAD_GATEWAY;
-      const data   = err?.response?.data   ?? { message: 'Service unavailable' };
+      if (err?.response) {
+        this.logger.error(
+          `Proxy error [${service}] ${method} ${path}: ${err.response.status} — ${err.message}`,
+        );
+        throw new HttpException(err.response.data ?? { message: 'Upstream error' }, err.response.status);
+      }
+
+      const isTimeout = err?.name === 'TimeoutError' || err?.code === 'ETIMEDOUT';
+      const status    = isTimeout ? HttpStatus.GATEWAY_TIMEOUT : HttpStatus.BAD_GATEWAY;
+      const reason    = err?.code ?? err?.name ?? 'unknown';
+      const message   = isTimeout
+        ? `${service}-service did not respond within ${timeoutMs / 1000}s`
+        : `${service}-service is unreachable (${reason})`;
 
       this.logger.error(
-        `Proxy error [${service}] ${method} ${path}: ${status} — ${err.message}`,
+        `Proxy error [${service}] ${method} ${path}: ${status} — ${reason} — ${err?.message ?? '(no message)'}`,
       );
-      throw new HttpException(data, status);
+      throw new HttpException({ message }, status);
     }
   }
 

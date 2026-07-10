@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
-import { useSelector } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import { Header }    from '../../components/ui/Header';
 import { Card }      from '../../components/ui/Card';
@@ -15,7 +15,8 @@ import { TokenIcon } from '../../components/ui/TokenIcon';
 import { ChainBadge }from '../../components/ui/ChainBadge';
 import { colors, typography, spacing, radius } from '../../theme';
 import { api } from '../../services/api';
-import type { RootState } from '../../store';
+import { fetchBalances } from '../../store/slices/walletSlice';
+import type { AppDispatch, RootState } from '../../store';
 
 const TOKEN_META: Record<string, { name: string; desc: string }> = {
   INRX:  { name: 'e-Rupee',  desc: '1 INRX = 1 Indian Rupee, backed by bank deposits & government securities' },
@@ -49,7 +50,8 @@ export default function TokenDetailScreen() {
   const token      = route.params?.token ?? 'INRX';
   const meta       = TOKEN_META[token] ?? { name: token, desc: '' };
 
-  const { balances } = useSelector((s: RootState) => s.wallet);
+  const dispatch = useDispatch<AppDispatch>();
+  const { balances, activeWalletIndex } = useSelector((s: RootState) => s.wallet);
   const chainBalances = (balances ?? []).filter((b: any) => b.symbol === token);
   const totalBalance  = chainBalances.reduce(
     (sum: number, b: any) => sum + parseFloat(b.balance || '0'), 0
@@ -87,7 +89,7 @@ export default function TokenDetailScreen() {
 
   const loadTxs = useCallback(async () => {
     try {
-      const res  = await api.getTransactions(1, 50);
+      const res  = await api.getTransactions(1, 50, activeWalletIndex);
       const data = res.data ?? res.transactions ?? res ?? [];
       const filtered = (Array.isArray(data) ? data : []).filter(
         (tx: any) => tx.tokenSymbol === token || tx.token === token
@@ -95,12 +97,16 @@ export default function TokenDetailScreen() {
       setRecentTxs(filtered.slice(0, 3));
     } catch { setRecentTxs([]); }
     setLoadingTxs(false);
-  }, [token]);
+  }, [token, activeWalletIndex]);
 
+  // Re-run on focus AND whenever the active wallet changes, and also make
+  // sure the shared `balances` (used above for totalBalance) reflect the
+  // active wallet in case this screen is opened before Dashboard ever fetches.
   useFocusEffect(useCallback(() => {
+    dispatch(fetchBalances(activeWalletIndex));
     loadInfo();
     loadTxs();
-  }, [loadInfo, loadTxs]));
+  }, [dispatch, activeWalletIndex, loadInfo, loadTxs]));
 
   const onRefresh = async () => {
     setRefreshing(true);

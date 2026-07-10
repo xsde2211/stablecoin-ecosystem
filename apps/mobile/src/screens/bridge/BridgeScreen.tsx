@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Alert, TextInput, Platform,
+  Alert, TextInput, Platform, ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useNavigation, useRoute } from '@react-navigation/native';
-import { useSelector } from 'react-redux';
+import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
+import { useDispatch, useSelector } from 'react-redux';
 import { Ionicons } from '@expo/vector-icons';
 import { Header }    from '../../components/ui/Header';
 import { Button }    from '../../components/ui/Button';
@@ -13,20 +13,39 @@ import { TokenIcon }  from '../../components/ui/TokenIcon';
 import { ChainBadge } from '../../components/ui/ChainBadge';
 import { colors, typography, spacing, radius } from '../../theme';
 import { api } from '../../services/api';
-import type { RootState } from '../../store';
+import { fetchBalances } from '../../store/slices/walletSlice';
+import type { AppDispatch, RootState } from '../../store';
 
 const TOKENS = ['INRX', 'EGOLD', 'ESLVR'];
 const CHAINS  = ['tron', 'ethereum', 'bsc', 'polygon'];
 const TAB_H   = Platform.OS === 'ios' ? 84 : 68;
 type Mode = 'lock' | 'burn';
+type Step = 'form' | 'processing' | 'success' | 'failed' | 'timeout';
+
+// The backend now moves a transfer through these statuses in order.
+// (SIGNATURES_COLLECTED only shows up once validator signatures are in —
+// in MODE=PRODUCTION that can sit on LOCKED for a while until the validator
+// dashboard picks it up; in MODE=TESTING it moves through automatically.)
+const STATUS_ORDER = ['PENDING', 'LOCKED', 'SIGNATURES_COLLECTED', 'COMPLETED'];
+
+const POLL_INTERVAL_MS = 2500;
+const POLL_MAX_ATTEMPTS = 72; // ~3 minutes
 
 export default function BridgeScreen() {
   const navigation = useNavigation<any>();
   const route      = useRoute<any>();
   const insets     = useSafeAreaInsets();
   const footerPb   = insets.bottom > 0 ? insets.bottom + 8 : TAB_H + 8;
+  const dispatch   = useDispatch<AppDispatch>();
 
-  const { balances } = useSelector((s: RootState) => s.wallet);
+  const { balances, activeWalletIndex } = useSelector((s: RootState) => s.wallet);
+
+  // Keep balances fresh for whichever wallet is currently active.
+  useFocusEffect(
+    useCallback(() => {
+      dispatch(fetchBalances(activeWalletIndex));
+    }, [dispatch, activeWalletIndex])
+  );
 
   const [mode,       setMode]       = useState<Mode>('lock');
   const [token,      setToken]      = useState(route.params?.token ?? 'INRX');
@@ -35,7 +54,47 @@ export default function BridgeScreen() {
   const [amount,     setAmount]     = useState('');
   const [dstAddress, setDstAddress] = useState('');
   const [loading,    setLoading]    = useState(false);
-  const [step,       setStep]       = useState<'form'|'success'>('form');
+  const [step,       setStep]       = useState<Step>('form');
+
+  // ── Live progress tracking ────────────────────────────────────────────────
+  const [transferId, setTransferId]         = useState<string | null>(null);
+  const [transferStatus, setTransferStatus] = useState<string>('PENDING');
+  const [errorMsg, setErrorMsg]             = useState('');
+  const pollTimer  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollCount  = useRef(0);
+
+  const stopPolling = useCallback(() => {
+    if (pollTimer.current) { clearInterval(pollTimer.current); pollTimer.current = null; }
+  }, []);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  const startPolling = useCallback((id: string) => {
+    pollCount.current = 0;
+    stopPolling();
+    pollTimer.current = setInterval(async () => {
+      pollCount.current += 1;
+      try {
+        const t = await api.getBridgeTransfer(id);
+        setTransferStatus(t.status);
+        if (t.status === 'COMPLETED') {
+          stopPolling();
+          dispatch(fetchBalances(activeWalletIndex)); // funds moved — refresh
+          setStep('success');
+        } else if (t.status === 'FAILED' || t.status === 'EXPIRED') {
+          stopPolling();
+          setErrorMsg(t.status === 'EXPIRED' ? 'This transfer expired before it could complete.' : 'The transfer failed while processing on-chain.');
+          setStep('failed');
+        }
+      } catch {
+        // transient network hiccup — just try again next tick
+      }
+      if (pollCount.current >= POLL_MAX_ATTEMPTS) {
+        stopPolling();
+        setStep('timeout');
+      }
+    }, POLL_INTERVAL_MS);
+  }, [dispatch, activeWalletIndex, stopPolling]);
 
   const balance          = (balances ?? []).find((b: any) => b.symbol === token && b.chain === srcChain);
   const availableBalance = parseFloat(balance?.balance ?? '0');
@@ -45,13 +104,144 @@ export default function BridgeScreen() {
   const handleBridge = async () => {
     setLoading(true);
     try {
-      if (mode === 'lock') await api.initiateBridge({ srcChain, dstChain, token, amount, dstAddress });
-      else                 await api.burnBridge({ chain: srcChain, token, amount, srcChain: dstChain, srcRecipient: dstAddress });
-      setStep('success');
+      // Bridge/burn from whichever wallet is currently active.
+      let res: any;
+      if (mode === 'lock') {
+        res = await api.initiateBridge({ srcChain, dstChain, token, amount, dstAddress, walletIndex: activeWalletIndex });
+      } else {
+        res = await api.burnBridge({ chain: srcChain, token, amount, srcChain: dstChain, srcRecipient: dstAddress, walletIndex: activeWalletIndex });
+      }
+      // IMPORTANT: this response only means the transfer was QUEUED — the
+      // actual lock/burn/mint/unlock happen asynchronously afterward. Show
+      // live progress instead of an immediate "success", which previously
+      // claimed the bridge worked before anything had actually happened
+      // on-chain yet.
+      setTransferId(res.id);
+      setTransferStatus(res.status ?? 'PENDING');
+      setStep('processing');
+      startPolling(res.id);
     } catch (err: any) {
       Alert.alert('Bridge failed', err?.response?.data?.message ?? 'Please try again');
     } finally { setLoading(false); }
   };
+
+  const resetForm = () => {
+    setStep('form');
+    setAmount('');
+    setDstAddress('');
+    setTransferId(null);
+    setTransferStatus('PENDING');
+    setErrorMsg('');
+  };
+
+  // ── Processing screen ─────────────────────────────────────────────────────
+  if (step === 'processing') {
+    const currentIdx = STATUS_ORDER.indexOf(transferStatus);
+    const stageLabel = (statusKey: string) => {
+      switch (statusKey) {
+        case 'PENDING':
+          return `${mode === 'lock' ? 'Locking' : 'Burning'} your ${token} on ${srcChain.toUpperCase()}…`;
+        case 'LOCKED':
+          return `Funds ${mode === 'lock' ? 'locked' : 'burned'} on ${srcChain.toUpperCase()} ✓ — collecting validator signatures…`;
+        case 'SIGNATURES_COLLECTED':
+          return `Signatures collected ✓ — ${mode === 'lock' ? 'minting' : 'unlocking'} on ${dstChain.toUpperCase()}…`;
+        case 'COMPLETED':
+          return 'Bridge complete ✓';
+        default:
+          return 'Processing…';
+      }
+    };
+
+    return (
+      <SafeAreaView style={styles.flex} edges={['top']}>
+        <View style={styles.flex}>
+          <View style={styles.successCenter}>
+            <View style={styles.successIcon}>
+              <ActivityIndicator color={colors.teal} size="large" />
+            </View>
+            <Text style={typography.h2}>Processing Bridge</Text>
+            <Text style={[styles.successDesc, { marginBottom: spacing.xl }]}>
+              {amount} {token} · {srcChain.toUpperCase()} → {dstChain.toUpperCase()}
+            </Text>
+
+            <View style={styles.stepList}>
+              {STATUS_ORDER.map((s, i) => {
+                const done    = i < currentIdx || (i === currentIdx && s === 'COMPLETED');
+                const current = i === currentIdx && s !== 'COMPLETED';
+                return (
+                  <View key={s} style={styles.stepRow}>
+                    <View style={[
+                      styles.stepDot,
+                      done && styles.stepDotDone,
+                      current && styles.stepDotCurrent,
+                    ]}>
+                      {done ? (
+                        <Ionicons name="checkmark" size={12} color="#000" />
+                      ) : current ? (
+                        <ActivityIndicator size="small" color={colors.teal} />
+                      ) : null}
+                    </View>
+                    <Text style={[styles.stepText, (done || current) && styles.stepTextActive]}>
+                      {stageLabel(s)}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Timeout screen — not failed, just taking longer than expected ─────────
+  if (step === 'timeout') {
+    return (
+      <SafeAreaView style={styles.flex} edges={['top']}>
+        <View style={styles.flex}>
+          <View style={styles.successCenter}>
+            <View style={styles.successIcon}>
+              <Ionicons name="time-outline" size={36} color={colors.info} />
+            </View>
+            <Text style={typography.h2}>Still Processing</Text>
+            <Text style={styles.successDesc}>
+              This is taking longer than usual. Your transfer is still moving — check Bridge History for live updates.
+            </Text>
+          </View>
+          <View style={[styles.footer, { paddingBottom: footerPb }]}>
+            <Button label="View Bridge History" variant="secondary" onPress={() => { resetForm(); navigation.navigate('BridgeHistory'); }} />
+            <View style={{ height: spacing.sm }} />
+            <Button label="Done" onPress={() => { resetForm(); navigation.navigate('DashboardTab'); }} />
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Failed screen ──────────────────────────────────────────────────────────
+  if (step === 'failed') {
+    return (
+      <SafeAreaView style={styles.flex} edges={['top']}>
+        <View style={styles.flex}>
+          <View style={styles.successCenter}>
+            <View style={[styles.successIcon, styles.failIcon]}>
+              <Ionicons name="close" size={36} color={colors.error} />
+            </View>
+            <Text style={typography.h2}>Bridge Failed</Text>
+            <Text style={styles.successDesc}>
+              {errorMsg || 'Something went wrong while processing this transfer.'}{'\n\n'}
+              Your original funds are safe — nothing completes on the destination chain unless the source lock/burn itself succeeded.
+            </Text>
+          </View>
+          <View style={[styles.footer, { paddingBottom: footerPb }]}>
+            <Button label="View Bridge History" variant="secondary" onPress={() => { resetForm(); navigation.navigate('BridgeHistory'); }} />
+            <View style={{ height: spacing.sm }} />
+            <Button label="Try Again" onPress={resetForm} />
+          </View>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   if (step === 'success') {
     return (
@@ -61,16 +251,15 @@ export default function BridgeScreen() {
             <View style={styles.successIcon}>
               <Ionicons name="swap-horizontal" size={36} color={colors.teal} />
             </View>
-            <Text style={typography.h2}>Bridge Initiated</Text>
+            <Text style={typography.h2}>Bridge Complete</Text>
             <Text style={styles.successDesc}>
-              {amount} {token} is moving from {srcChain.toUpperCase()} → {dstChain.toUpperCase()}.{'\n\n'}
-              Typically completes in 5-15 minutes while validators confirm.
+              {amount} {token} has moved from {srcChain.toUpperCase()} → {dstChain.toUpperCase()}.
             </Text>
           </View>
           <View style={[styles.footer, { paddingBottom: footerPb }]}>
-            <Button label="View Bridge History" variant="secondary" onPress={() => navigation.navigate('BridgeHistory')} />
+            <Button label="View Bridge History" variant="secondary" onPress={() => { resetForm(); navigation.navigate('BridgeHistory'); }} />
             <View style={{ height: spacing.sm }} />
-            <Button label="Done" onPress={() => navigation.navigate('DashboardTab')} />
+            <Button label="Done" onPress={() => { resetForm(); navigation.navigate('DashboardTab'); }} />
           </View>
         </View>
       </SafeAreaView>
@@ -193,7 +382,20 @@ const styles = StyleSheet.create({
 
   successCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: spacing.xl },
   successIcon:   { width: 80, height: 80, borderRadius: 40, backgroundColor: colors.tealBg2, borderWidth: 1, borderColor: colors.tealBorder, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.xl },
+  failIcon:      { backgroundColor: colors.errorBg, borderColor: colors.error + '40' },
   successDesc:   { ...typography.body, color: colors.textSecondary, textAlign: 'center', marginTop: 8, lineHeight: 22 },
+
+  stepList: { width: '100%', gap: spacing.md },
+  stepRow:  { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  stepDot: {
+    width: 22, height: 22, borderRadius: 11,
+    backgroundColor: colors.surfaceHigh, borderWidth: 1.5, borderColor: colors.border,
+    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  },
+  stepDotDone:    { backgroundColor: colors.success, borderColor: colors.success },
+  stepDotCurrent: { backgroundColor: colors.tealBg2, borderColor: colors.teal },
+  stepText:      { ...typography.sm, color: colors.textTertiary, flex: 1 },
+  stepTextActive:{ color: colors.text, fontWeight: '600' as const },
 
   modeTabs: { flexDirection: 'row', backgroundColor: colors.surface, borderRadius: radius.lg, padding: 4, borderWidth: 1, borderColor: colors.border },
   modeTab:  { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: radius.md },

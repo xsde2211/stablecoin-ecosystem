@@ -18,7 +18,11 @@
         "backgroundColor": "#09090F"
       },
       "package": "com.stablecoin.wallet",
-      "usesCleartextTraffic": true
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "ios": {
       "supportsTablet": true,
@@ -26,10 +30,17 @@
     },
     "plugins": [
       "expo-secure-store",
-      ["expo-camera", { "cameraPermission": "Allow e-Rupee to scan QR codes for payments" }]
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow e-Rupee to scan QR codes for payments"
+        }
+      ]
     ],
     "extra": {
-      "eas": { "projectId": "your-eas-project-id" }
+      "eas": {
+        "projectId": "e9daa870-0a76-48a4-aa97-f05bbc52f8df"
+      }
     }
   }
 }
