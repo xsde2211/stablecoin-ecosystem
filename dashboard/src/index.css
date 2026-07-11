@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background:
+    radial-gradient(1200px 600px at 8% -10%, rgba(201,162,75,0.07), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(184,192,200,0.05), transparent 55%),
+    #14120F;
+  min-height: 100vh;
+}
+
+::selection {
+  background: rgba(201,162,75,0.35);
+}
+
+/* tabular numerals everywhere financial figures appear */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
