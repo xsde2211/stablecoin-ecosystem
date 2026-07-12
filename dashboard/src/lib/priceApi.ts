@@ -40,6 +40,7 @@ function writeMetalsCache(cache: MetalsCache) {
 async function fetchJson(url: string, timeoutMs = 10000): Promise<any> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
@@ -53,11 +54,20 @@ async function fetchJson(url: string, timeoutMs = 10000): Promise<any> {
 // (or a second browser tab) within the poll window reuses the cached value
 // instead of spending another call — this is what keeps a handful of
 // visitors from blowing through the budget within the same hour.
-async function fetchMetalsUsdPerOz(): Promise<{ goldUsdPerOz: number; silverUsdPerOz: number; fromCache: boolean }> {
+async function fetchMetalsUsdPerOz(): Promise<{
+  goldUsdPerOz: number;
+  silverUsdPerOz: number;
+  fromCache: boolean;
+}> {
   const cached = readMetalsCache();
   const fresh = cached && Date.now() - cached.fetchedAt < METALS_POLL_MS;
+
   if (fresh && cached) {
-    return { goldUsdPerOz: cached.goldUsdPerOz, silverUsdPerOz: cached.silverUsdPerOz, fromCache: true };
+    return {
+      goldUsdPerOz: cached.goldUsdPerOz,
+      silverUsdPerOz: cached.silverUsdPerOz,
+      fromCache: true,
+    };
   }
 
   try {
@@ -65,55 +75,112 @@ async function fetchMetalsUsdPerOz(): Promise<{ goldUsdPerOz: number; silverUsdP
       fetchJson('https://api.gold-api.com/price/XAU'),
       fetchJson('https://api.gold-api.com/price/XAG'),
     ]);
+
     const goldUsdPerOz = Number(goldRes?.price);
     const silverUsdPerOz = Number(silverRes?.price);
-    if (!goldUsdPerOz || !silverUsdPerOz) throw new Error('Invalid metals price response');
 
-    writeMetalsCache({ goldUsdPerOz, silverUsdPerOz, fetchedAt: Date.now() });
-    return { goldUsdPerOz, silverUsdPerOz, fromCache: false };
-  } catch (err) {
+    if (!goldUsdPerOz || !silverUsdPerOz) {
+      throw new Error('Invalid metals price response');
+    }
+
+    writeMetalsCache({
+      goldUsdPerOz,
+      silverUsdPerOz,
+      fetchedAt: Date.now(),
+    });
+
+    return {
+      goldUsdPerOz,
+      silverUsdPerOz,
+      fromCache: false,
+    };
+  } catch {
     // Live fetch failed (rate-limited, network blip, etc.) — fall back to
     // whatever we last had, even if stale, rather than showing nothing.
-    if (cached) return { goldUsdPerOz: cached.goldUsdPerOz, silverUsdPerOz: cached.silverUsdPerOz, fromCache: true };
-    throw err;
+    if (cached) {
+      return {
+        goldUsdPerOz: cached.goldUsdPerOz,
+        silverUsdPerOz: cached.silverUsdPerOz,
+        fromCache: true,
+      };
+    }
+
+    throw new Error('Unable to fetch metals prices');
   }
 }
 
-// USD/INR: open.er-api.com primary, frankfurter.app fallback — same
-// resilience pattern used on the backend oracle feed (two independent
-// sources so one outage doesn't blank the whole dashboard).
-async function fetchUsdInr(): Promise<number> {
+// ─── PRIMARY price source: Tether, via CoinGecko ────────────────────────────
+//
+// Fetches USDT's real live market price in BOTH USD and INR in one call.
+// These are used directly, as-is, from the API — never re-derived by
+// multiplying one by the other, since USDT does trade at a slight
+// premium/discount to $1 in practice and doing usdtUsd * usdInr (or the
+// reverse) would silently throw that real signal away.
+async function fetchUsdtPrices(): Promise<{
+  usdtUsd: number;
+  usdtInr: number;
+}> {
+  const res = await fetchJson(
+    'https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd,inr&x_cg_demo_api_key=CG-wWC6r73xwZVpEJSrZhLfFV9J'
+  );
+
+  
+  const usdtUsd = Number(res?.tether?.usd);
+  const usdtInr = Number(res?.tether?.inr);
+
+  if (!usdtUsd || !usdtInr) {
+    throw new Error('Invalid USDT price response');
+  }
+
+  return {
+    usdtUsd,
+    usdtInr: usdtInr - TETHER_INR_SPREAD,
+  };
+}
+
+// ─── FALLBACK ONLY — never called unless fetchUsdtPrices() above fails outright ───
+async function fetchUsdInrFallback(): Promise<number> {
   try {
     const res = await fetchJson('https://open.er-api.com/v6/latest/USD');
     const rate = Number(res?.rates?.INR);
-    if (!rate) throw new Error('Invalid primary FX response');
+
+    if (!rate) {
+      throw new Error('Invalid primary FX response');
+    }
+
     return rate;
   } catch {
-    const res = await fetchJson('https://api.frankfurter.app/latest?from=USD&to=INR');
+    const res = await fetchJson(
+      'https://api.frankfurter.app/latest?from=USD&to=INR'
+    );
+
     const rate = Number(res?.rates?.INR);
-    if (!rate) throw new Error('Invalid fallback FX response');
+
+    if (!rate) {
+      throw new Error('Invalid fallback FX response');
+    }
+
     return rate;
   }
 }
 
-// USDT's real live market price in USD and INR — sourced directly from
-// CoinGecko rather than derived (usdInr * 1), since USDT does trade at a
-// slight premium/discount to $1 in practice and the brief asks for its
-// actual live price.
-async function fetchUsdtPrices(): Promise<{ usdtUsd: number; usdtInr: number }> {
-  const res = await fetchJson('https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=usd,inr');
-  const usdtUsd = Number(res?.tether?.usd);
-  const usdtInr = Number(res?.tether?.inr);
-  if (!usdtUsd || !usdtInr) throw new Error('Invalid USDT price response');
-  return { usdtUsd, usdtInr };
-}
+const TETHER_INR_SPREAD = 0.20;
 
 export async function fetchMarketPrices(): Promise<MarketPrices> {
-  const [{ goldUsdPerOz, silverUsdPerOz }, usdInr, usdt] = await Promise.all([
+  const [{ goldUsdPerOz, silverUsdPerOz }, usdt] = await Promise.all([
     fetchMetalsUsdPerOz(),
-    fetchUsdInr(),
-    fetchUsdtPrices().catch(() => null), // don't let a CoinGecko hiccup take down the whole page
+    fetchUsdtPrices().catch(() => null), // null here is the ONLY thing that triggers the forex fallback below
   ]);
+
+  // usdInr: Tether's real INR price minus the spread — this is the single
+  // INR rate used everywhere in this dashboard (INRX value, gold/silver
+  // INR conversion). usdtInr in the returned object is the RAW Tether/INR
+  // price straight from the API, untouched — the two are related but
+  // deliberately not the same number (one has the spread applied, one
+  // doesn't), and neither is ever computed by multiplying usdtUsd by usdInr.
+  const usdInr = usdt
+    ? (1/usdt.usdtUsd)*usdt.usdtInr
+    : await fetchUsdInrFallback();
 
   const goldUsdPerGram = goldUsdPerOz / TROY_OUNCE_IN_GRAMS;
   const silverUsdPerGram = silverUsdPerOz / TROY_OUNCE_IN_GRAMS;

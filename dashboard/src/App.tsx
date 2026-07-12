@@ -16,7 +16,14 @@ export default function App() {
   const chain = CHAINS.find((c) => c.id === networkId)!;
 
   const { prices, loading: pricesLoading, error: pricesError } = useMarketPrices();
-  const { balances, loading: balancesLoading, error: balancesError, updatedAt } = useContractBalances(chain);
+  const { holders, loading: balancesLoading, error: balancesError, updatedAt } = useContractBalances(chain);
+
+  // PortfolioValue only needs each token's total, not the full holder
+  // breakdown — derive that from the holder data so it keeps working
+  // unchanged.
+  const balances = holders
+    ? { INRX: holders.INRX.totalHeld, EGOLD: holders.EGOLD.totalHeld, ESLVR: holders.ESLVR.totalHeld }
+    : null;
 
   const [, forceTick] = useState(0);
   useEffect(() => {
@@ -52,7 +59,7 @@ export default function App() {
           <div className="lg:col-span-2">
             <ContractBalances
               chain={chain}
-              balances={balances}
+              holders={holders}
               loading={balancesLoading}
               error={balancesError}
               updatedAt={updatedAt}
@@ -65,7 +72,7 @@ export default function App() {
       </main>
 
       <footer className="max-w-6xl mx-auto px-6 py-8 text-xs text-muted/70 flex flex-wrap items-center justify-between gap-2">
-        <span>Prices: gold-api.com (metals, ~7 min refresh) · open.er-api.com / frankfurter.app (USD/INR) · CoinGecko (USDT)</span>
+        <span>Prices: gold-api.com (metals, ~7 min refresh) · CoinGecko Tether/INR minus ₹0.20 spread (primary USD/INR rate) · open.er-api.com / frankfurter.app (fallback only)</span>
         <span>{prices ? `Prices updated ${formatCompactAge(Date.now() - prices.updatedAt)}` : ''}</span>
       </footer>
     </div>
