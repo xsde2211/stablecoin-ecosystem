@@ -1,4 +1,4 @@
-import { fetchMetalsUsdPerOz, getUsdInrRate, setCors, TROY_OUNCE_IN_GRAMS } from './_lib/priceSources';
+import { fetchMetalsUsdPerOz, getUsdInrRate, setCors, TROY_OUNCE_IN_GRAMS } from './_lib/priceSources.js';
 
 // This is the one stablecoin-service actually calls — everything it needs
 // (USD/INR rate, gold/silver per gram in both USD and INR) in a single

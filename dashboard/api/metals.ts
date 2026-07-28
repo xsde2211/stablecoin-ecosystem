@@ -1,4 +1,4 @@
-import { fetchMetalsUsdPerOz, getUsdInrRate, setCors, TROY_OUNCE_IN_GRAMS } from './_lib/priceSources';
+import { fetchMetalsUsdPerOz, getUsdInrRate, setCors, TROY_OUNCE_IN_GRAMS } from './_lib/priceSources.js';
 
 export default async function handler(req: any, res: any) {
   setCors(res);

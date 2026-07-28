@@ -1,4 +1,4 @@
-import { getUsdInrRate, setCors } from './_lib/priceSources';
+import { getUsdInrRate, setCors } from './_lib/priceSources.js';
 
 export default async function handler(req: any, res: any) {
   setCors(res);
