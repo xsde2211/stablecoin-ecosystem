@@ -33,8 +33,11 @@ contract EGold is
     uint256 public goldPricePerGram; // in INR, 6 decimals
     address public priceOracle;
 
-    event Mint(address indexed to, uint256 grams, uint256 priceAtMint);
-    event Burn(address indexed from, uint256 grams);
+    uint256 public totalMinted;
+    uint256 public totalBurned;
+    
+    event Mint(address indexed to, uint256 grams, uint256 priceAtMint, string indexed reason);
+    event Burn(address indexed from, uint256 grams, string indexed reason);
     event GoldPriceUpdated(uint256 newPrice);
     event Blacklisted(address indexed account, bool status);
     event AddressFrozen(address indexed account, bool status);
@@ -65,16 +68,24 @@ contract EGold is
         priceOracle = admin;
     }
 
-    function mint(address to, uint256 grams) external onlyRole(MINTER_ROLE) {
+    function mint(address to, uint256 grams,string calldata reason) external onlyRole(MINTER_ROLE) {
         require(!_blacklisted[to], "EGold: blacklisted");
         require(totalSupply() + grams <= mintCap, "EGold: mint cap exceeded");
+        totalMinted += grams; 
         _mint(to, grams);
-        emit Mint(to, grams, goldPricePerGram);
+        emit Mint(to, grams, goldPricePerGram, reason);
     }
 
-    function burn(address from, uint256 grams) external onlyRole(BURNER_ROLE) {
+    function burn(address from, uint256 grams,string calldata reason) external onlyRole(BURNER_ROLE) {
+        totalBurned += grams;              
         _burn(from, grams);
-        emit Burn(from, grams);
+        emit Burn(from, grams,reason);
+    }
+
+    function burnFrom(uint256 grams, string calldata reason) external {
+        totalBurned += grams;
+        _burn(msg.sender, grams);
+        emit Burn(msg.sender, grams, reason);
     }
 
     function updateGoldPrice(uint256 newPrice) external {
@@ -93,18 +104,21 @@ contract EGold is
         emit AddressFrozen(account, status);
     }
 
-    function isBlacklisted(address a) external view returns (bool){
-        return _blacklisted[a];
-    }
-
-    function isFrozen(address a) external view returns (bool){
-        return _frozen[a];
-    }
-
     function setMintCap(uint256 newCap) external onlyRole(TREASURY_ROLE){
         mintCap = newCap;
         emit MintCapUpdated(newCap);
     }
+
+
+    function isBlacklisted(address a) external view returns (bool){
+        return _blacklisted[a];
+    }
+    function isFrozen(address a) external view returns (bool){
+        return _frozen[a];
+    }
+
+    function circulatingSupply() external view returns (uint256) { return totalMinted - totalBurned; }
+
         
     function pause()   external onlyRole(DEFAULT_ADMIN_ROLE) { _pause(); }
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) { _unpause(); }

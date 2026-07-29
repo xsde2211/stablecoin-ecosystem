@@ -70,7 +70,7 @@ contract INRX is
     ) external onlyRole(MINTER_ROLE) {
         require(!_blacklisted[to], "INRX: recipient blacklisted");
         require(!_frozen[to], "INRX: recipient frozen");
-        require(totalMinted + amount <= mintCap, "INRX: mint cap exceeded");
+        require(totalSupply()  + amount <= mintCap, "INRX: mint cap exceeded");
 
         totalMinted += amount;
         _mint(to, amount);

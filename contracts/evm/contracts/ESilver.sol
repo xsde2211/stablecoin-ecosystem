@@ -31,9 +31,11 @@ contract ESilver is
     uint256 public silverPricePerGram; // in INR, 6 decimals
     address public priceOracle;
     uint256 public mintCap;
+    uint256 public totalMinted;
+    uint256 public totalBurned;
 
-    event Mint(address indexed to, uint256 grams, uint256 priceAtMint);
-    event Burn(address indexed from, uint256 grams);
+    event Mint(address indexed to, uint256 grams, uint256 priceAtMint, string indexed reason);
+    event Burn(address indexed from, uint256 grams, string indexed reason);
     event Blacklisted(address indexed account, bool status);
     event AddressFrozen(address indexed account, bool status);
     event MintCapUpdated(uint256 newCap);
@@ -63,18 +65,26 @@ contract ESilver is
         priceOracle = admin;
     }
 
-    function mint(address to, uint256 grams) external onlyRole(MINTER_ROLE) {
+    function mint(address to, uint256 grams,string calldata reason) external onlyRole(MINTER_ROLE) {
         require(!_blacklisted[to], "ESilver: blacklisted");
         require(totalSupply() + grams <= mintCap, "ESilver: mint cap exceeded");
+        totalMinted += grams; 
         _mint(to, grams);
-        emit Mint(to, grams, silverPricePerGram);
+        emit Mint(to, grams, silverPricePerGram, reason);
     }
 
-    function burn(address from, uint256 grams) external onlyRole(BURNER_ROLE) {
+    function burn(address from, uint256 grams,string calldata reason) external onlyRole(BURNER_ROLE) {
+        totalBurned += grams;              
         _burn(from, grams);
-        emit Burn(from, grams);
+        emit Burn(from, grams,reason);
     }
 
+    function burnFrom(uint256 grams, string calldata reason) external {
+        totalBurned += grams;
+        _burn(msg.sender, grams);
+        emit Burn(msg.sender, grams, reason);
+    }
+    
     function updateSilverPrice(uint256 newPrice) external {
         require(msg.sender == priceOracle, "ESilver: not oracle");
         silverPricePerGram = newPrice;
@@ -102,6 +112,8 @@ contract ESilver is
     function isFrozen(address a) external view returns (bool){
         return _frozen[a];
     }
+
+    function circulatingSupply() external view returns (uint256) { return totalMinted - totalBurned; }
 
     function pause()   external onlyRole(DEFAULT_ADMIN_ROLE) { _pause(); }
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) { _unpause(); }
