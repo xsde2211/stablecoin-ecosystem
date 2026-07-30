@@ -94,15 +94,24 @@ export default function DashboardScreen() {
   const aggregated = ['INRX', 'EGOLD', 'ESLVR'].map(sym => {
     const rows  = (balances ?? []).filter((b: any) => b.symbol === sym);
     const total = rows.reduce((s: number, r: any) => s + parseFloat(r.balance || '0'), 0);
-    return { sym, total, chains: rows };
+    // valueUsd/valueInr come straight from wallet-service, computed fresh
+    // from live INR/gold/silver market prices — NOT the hardcoded guesses
+    // this used to fall back to (₹5900/gram gold, ₹75/gram silver, frozen
+    // at whatever those were when this screen was written). Each chain
+    // row's own value already accounts for that row's own balance, so
+    // summing across rows gives the token's true total value, not a
+    // double-count.
+    const valueUsd = rows.reduce((s: number, r: any) => s + (r.valueUsd ?? 0), 0);
+    const valueInr = rows.reduce((s: number, r: any) => s + (r.valueInr ?? 0), 0);
+    const priceUsd = total > 0 && rows.some((r: any) => r.valueUsd != null) ? valueUsd / total : null;
+    return { sym, total, chains: rows, valueUsd, valueInr, priceUsd };
   });
 
-  const portfolioINR = aggregated.reduce((sum, t) => {
-    if (t.sym === 'INRX')  return sum + t.total;
-    if (t.sym === 'EGOLD') return sum + t.total * 5900;
-    if (t.sym === 'ESLVR') return sum + t.total * 75;
-    return sum;
-  }, 0);
+  // Real portfolio value — sum of each token's live-priced value, not the
+  // old fixed-multiplier estimate.
+  const portfolioINR = aggregated.reduce((sum, t) => sum + t.valueInr, 0);
+  const portfolioUSD = aggregated.reduce((sum, t) => sum + t.valueUsd, 0);
+  const hasLivePrices = aggregated.some(t => t.priceUsd != null);
 
   const recentTxs = (transactions ?? []).slice(0, 5);
   const isLoading = loading && aggregated.every(t => t.total === 0);
@@ -168,12 +177,18 @@ export default function DashboardScreen() {
             {isLoading ? (
               <Skeleton width={180} height={44} style={{ marginVertical: 8 }} />
             ) : (
-              <Text style={styles.heroValue}>₹{fmt(portfolioINR)}</Text>
+              <>
+              <Text style={styles.heroValue}>₹{fmt(portfolioINR)}</Text> 
+              {hasLivePrices && (
+                <Text style={styles.heroValueUsdTotal}>≈ ${fmt(portfolioUSD)}</Text>
+              )}
+              </>
             )}
             <View style={styles.quickRow}>
               {[
                 { icon: 'arrow-up-outline',       label: 'Send',    screen: 'Send'      },
                 { icon: 'arrow-down-outline',      label: 'Receive', screen: 'Receive'   },
+                { icon: 'repeat-outline',          label: 'Swap',    screen: 'Swap'      },
                 { icon: 'swap-horizontal-outline', label: 'Bridge',  screen: 'BridgeTab' },
                 { icon: 'qr-code-outline',         label: 'Pay',     screen: 'PayQR'     },
               ].map(a => (
@@ -232,6 +247,9 @@ export default function DashboardScreen() {
                 <View style={{ alignItems: 'flex-end' }}>
                   <Text style={styles.assetAmt}>{fmt(t.total)}</Text>
                   <Text style={styles.assetSym}>{t.sym}</Text>
+                  {t.priceUsd != null && (
+                    <Text style={styles.assetValueUsd}>≈ ${fmt(t.valueUsd)}</Text>
+                  )}
                 </View>
               </TouchableOpacity>
             ))
@@ -345,7 +363,8 @@ const styles = StyleSheet.create({
     alignItems: 'center', marginBottom: spacing.xs,
   },
   heroLabel: { ...typography.sm, color: colors.textTertiary },
-  heroValue: { ...typography.display, color: colors.text, marginBottom: spacing.xl },
+  heroValue: { ...typography.display, color: colors.text, marginBottom: spacing.xs },
+  heroValueUsdTotal: { ...typography.sm, color: colors.textTertiary, marginBottom: spacing.xl },
   quickRow:  { flexDirection: 'row', justifyContent: 'space-between' },
   quickBtn:  { alignItems: 'center', gap: spacing.xs, flex: 1 },
   quickIcon: {
@@ -373,6 +392,7 @@ const styles = StyleSheet.create({
   noBalance: { ...typography.xs, color: colors.textTertiary },
   assetAmt:  { ...typography.h5, color: colors.text },
   assetSym:  { ...typography.xs, color: colors.textTertiary, marginTop: 2 },
+  assetValueUsd: { ...typography.xs, color: colors.teal, marginTop: 2, fontWeight: '600' as const },
 
   txList:  { paddingHorizontal: spacing.xl, marginTop: spacing.xs },
   txRow: {

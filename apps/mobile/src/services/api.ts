@@ -123,6 +123,13 @@ class ApiService {
                              this.client.post('/treasury/requests', d).then(r => r.data);
   getMyTreasuryRequests = () => this.client.get('/treasury/requests/mine').then(r => r.data);
 
+  // ─── Swap ─────────────────────────────────────────────────────────────────
+  getSwapNetworks  = ()       => this.client.get('/swap/networks').then(r => r.data);
+  getSwapTokens    = ()       => this.client.get('/swap/tokens').then(r => r.data);
+  getSwapQuote     = (d: any) => this.client.post('/swap/quote', d).then(r => r.data);
+  executeSwap      = (quoteId: string) => this.client.post('/swap/execute', { quoteId }).then(r => r.data);
+  getSwapHistory   = (p=1, l=20) => this.client.get(`/swap/history?page=${p}&limit=${l}`).then(r => r.data);
+
 }
 
 export const api = new ApiService();

@@ -20,6 +20,8 @@ import TransactionsScreen      from '../screens/wallet/TransactionsScreen';
 import TransactionDetailScreen from '../screens/wallet/TransactionDetailScreen';
 import BridgeScreen        from '../screens/bridge/BridgeScreen';
 import BridgeHistoryScreen from '../screens/bridge/BridgeHistoryScreen';
+import SwapScreen          from '../screens/swap/SwapScreen';
+import SwapHistoryScreen from '../screens/swap/SwapHistoryScreen';
 import PayQRScreen         from '../screens/payments/PayQRScreen';
 import CreatePaymentScreen from '../screens/payments/CreatePaymentScreen';
 import PaymentDetailScreen from '../screens/payments/PaymentDetailScreen';
@@ -58,6 +60,8 @@ function DashboardStack() {
       <Stack.Screen name="Send"             component={SendScreen} />
       <Stack.Screen name="Receive"          component={ReceiveScreen} />
       <Stack.Screen name="TokenDetail"      component={TokenDetailScreen} />
+      <Stack.Screen name="Swap"             component={SwapScreen} />
+      <Stack.Screen name="SwapHistory" component={SwapHistoryScreen} />
       <Stack.Screen name="PayQR"            component={PayQRScreen} />
       <Stack.Screen name="CreatePayment"    component={CreatePaymentScreen} />
       <Stack.Screen name="PaymentDetail"    component={PaymentDetailScreen} />

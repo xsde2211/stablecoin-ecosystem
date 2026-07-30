@@ -56,6 +56,15 @@ export default function TokenDetailScreen() {
   const totalBalance  = chainBalances.reduce(
     (sum: number, b: any) => sum + parseFloat(b.balance || '0'), 0
   );
+  // valueUsd is per-chain-row from wallet-service (balance × today's live
+  // price) — summing across rows gives this token's total current value;
+  // dividing that by the total quantity gives the per-unit price, since
+  // the price itself is the same across chains (only the row's own
+  // balance differs).
+  const totalValueUsd = chainBalances.reduce((sum: number, b: any) => sum + (b.valueUsd ?? 0), 0);
+  const priceUsd = totalBalance > 0 && chainBalances.some((b: any) => b.valueUsd != null)
+    ? totalValueUsd / totalBalance
+    : null;
 
   const [chainInfo,   setChainInfo]   = useState<any[]>([]);
   const [reserve,     setReserve]     = useState<any>(null);
@@ -138,6 +147,12 @@ export default function TokenDetailScreen() {
           <TokenIcon token={token} size={64} />
           <Text style={styles.heroBalance}>{fmt(totalBalance, 4)}</Text>
           <Text style={styles.heroSymbol}>{token}</Text>
+          {priceUsd != null && (
+            <View style={styles.priceBlock}>
+              <Text style={styles.heroValueUsd}>≈ ${fmt(totalValueUsd)}</Text>
+              <Text style={styles.heroPricePerUnit}>1 {token} = ${priceUsd.toFixed(4)}</Text>
+            </View>
+          )}
           <Text style={styles.heroDesc}>{meta.desc}</Text>
         </View>
 
@@ -166,9 +181,14 @@ export default function TokenDetailScreen() {
             chainBalances.map((b: any, i: number) => (
               <View key={b.chain} style={[styles.chainRow, i < chainBalances.length - 1 && styles.rowBorder]}>
                 <ChainBadge chain={b.chain} />
-                <Text style={styles.chainBal}>
-                  {fmt(parseFloat(b.balance || '0'), 4)} {token}
-                </Text>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={styles.chainBal}>
+                    {fmt(parseFloat(b.balance || '0'), 4)} {token}
+                  </Text>
+                  {b.valueUsd != null && (
+                    <Text style={styles.chainBalUsd}>≈ ${fmt(b.valueUsd)}</Text>
+                  )}
+                </View>
               </View>
             ))
           )}
@@ -319,6 +339,9 @@ const styles = StyleSheet.create({
   hero:        { alignItems: 'center', paddingVertical: spacing.xl, gap: spacing.sm },
   heroBalance: { ...typography.h1, fontSize: 40, color: colors.text, marginTop: spacing.sm },
   heroSymbol:  { ...typography.sm, color: colors.textTertiary },
+  priceBlock:  { alignItems: 'center', gap: 2, marginTop: 2 },
+  heroValueUsd:     { ...typography.h5, color: colors.teal, fontWeight: '700' as const },
+  heroPricePerUnit: { ...typography.xs, color: colors.textTertiary },
   heroDesc:    { ...typography.sm, color: colors.textSecondary, textAlign: 'center', lineHeight: 20, paddingHorizontal: spacing.lg },
 
   actions:    { flexDirection: 'row', gap: spacing.sm, marginBottom: spacing.xl },
@@ -331,6 +354,7 @@ const styles = StyleSheet.create({
   chainRow:  { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.sm },
   rowBorder: { borderBottomWidth: 1, borderBottomColor: colors.border },
   chainBal:  { ...typography.sm, color: colors.text, fontWeight: '700' as const },
+  chainBalUsd: { ...typography.xs, color: colors.textTertiary, marginTop: 2 },
 
   reserveRow:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: spacing.sm },
   reserveLabel: { ...typography.sm, color: colors.text, fontWeight: '600' as const },

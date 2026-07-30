@@ -7,6 +7,17 @@ import { Badge, Button, Card, Input, Select } from '../components/ui';
 type RegistryContract = { key: string; label: string; roles: string[] };
 type Registry = { chains: string[]; contracts: RegistryContract[] };
 
+// TRON addresses are base58check, always start with "T", 34 characters total.
+// EVM addresses are 0x + 40 hex chars. Which one is valid depends entirely on
+// which chain is selected — validating against a single hardcoded EVM regex
+// (as before) meant a correct TRON address could never pass, and the Grant/
+// Revoke/Check buttons stayed disabled no matter what you typed.
+function isValidAddress(address: string, chain: string): boolean {
+  const trimmed = address.trim();
+  if (chain === 'tron') return /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(trimmed);
+  return /^0x[a-fA-F0-9]{40}$/.test(trimmed);
+}
+
 export default function RoleManagement() {
   const { isSuperAdmin } = useAuth();
 
@@ -48,7 +59,7 @@ export default function RoleManagement() {
   const chainOptions = (registry?.chains ?? []).map((c) => ({ label: c.toUpperCase(), value: c }));
   const contractOptions = (registry?.contracts ?? []).map((c) => ({ label: c.label, value: c.key }));
 
-  const canSubmit = chain && contract && role && /^0x[a-fA-F0-9]{40}$/.test(address.trim());
+  const canSubmit = !!chain && !!contract && !!role && isValidAddress(address, chain);
 
   const runCheck = async () => {
     setError(''); setCheckResult(null); setBusy('check');
@@ -105,7 +116,11 @@ export default function RoleManagement() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="mb-1.5 block text-xs font-medium text-slate-600">Chain</label>
-                <Select value={chain} onChange={setChain} options={chainOptions} />
+                <Select
+                  value={chain}
+                  onChange={(v) => { setChain(v); setCheckResult(null); }}
+                  options={chainOptions}
+                />
               </div>
               <div>
                 <label className="mb-1.5 block text-xs font-medium text-slate-600">Contract</label>
@@ -132,9 +147,14 @@ export default function RoleManagement() {
               <Input
                 value={address}
                 onChange={(e) => { setAddress(e.target.value); setCheckResult(null); }}
-                placeholder="0x028c268e79a725a8f3ede12d6f2a6cafb6fbcb60"
+                placeholder={chain === 'tron' ? 'TRju3er7y6JWFkmJYhWmLfrfU1yrX3zGV6' : '0x028c268e79a725a8f3ede12d6f2a6cafb6fbcb60'}
                 className="font-[family-name:var(--font-mono)] text-xs"
               />
+              {address.trim() && !isValidAddress(address, chain) && (
+                <p className="mt-1 text-xs text-rose-500">
+                  {chain === 'tron' ? 'Not a valid TRON address (must start with T, 34 characters)' : 'Not a valid EVM address (0x + 40 hex characters)'}
+                </p>
+              )}
             </div>
 
             {checkResult && (
