@@ -8,7 +8,7 @@ import { JwtStrategy }     from '../auth/jwt.strategy';
 
 @Module({
   imports: [
-    HttpModule.register({ timeout: 30_000 }),
+    HttpModule.register({ timeout: 60_000 }),
     PassportModule,
     JwtModule.register({ secret: process.env.JWT_SECRET }),
   ],

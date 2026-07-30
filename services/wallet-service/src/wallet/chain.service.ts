@@ -43,9 +43,13 @@ export class ChainService {
   private readonly CACHE_TTL_MS = 8_000;
 
   constructor() {
-    this.ethProvider     = new ethers.JsonRpcProvider(process.env.ETH_RPC!);
-    this.bscProvider     = new ethers.JsonRpcProvider(process.env.BSC_RPC!);
-    this.polygonProvider = new ethers.JsonRpcProvider(process.env.POLYGON_RPC!);
+    // staticNetwork:true skips ethers' auto-detect handshake (a fresh eth_chainId
+    // call) — without it, if that single handshake at startup fails or gets
+    // rate-limited, ethers enters its own internal infinite retry loop, logging
+    // "JsonRpcProvider failed to detect network... retry in 1s" forever.
+    this.ethProvider     = new ethers.JsonRpcProvider(process.env.ETH_RPC!,     11155111, { staticNetwork: true }); // Sepolia
+    this.bscProvider     = new ethers.JsonRpcProvider(process.env.BSC_RPC!,     97,       { staticNetwork: true }); // BSC testnet
+    this.polygonProvider = new ethers.JsonRpcProvider(process.env.POLYGON_RPC!, 80002,    { staticNetwork: true }); // Polygon Amoy
     this.solanaConn      = new Connection(process.env.SOLANA_RPC!);
   }
 

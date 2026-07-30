@@ -4,6 +4,7 @@ import {
   NotFoundException,
   Logger,
 } from '@nestjs/common';
+import axios from 'axios';
 import { PrismaService } from '../prisma/prisma.service';
 import { KmsService }    from './kms.service';
 import { ChainService }  from './chain.service';
@@ -205,6 +206,7 @@ export class WalletService {
 
     const tokens  = ['INRX', 'EGOLD', 'ESLVR'];
     const results = [];
+    const prices  = await this.getLivePricesCached();
 
     for (const wallet of wallets) {
       for (const symbol of tokens) {
@@ -212,11 +214,43 @@ export class WalletService {
         if (!tokenAddress) continue;
 
         const balance = await this.chain.getBalance(wallet.chain, wallet.address, tokenAddress);
-        results.push({ chain: wallet.chain, address: wallet.address, symbol, balance, walletIndex });
+        const price   = prices?.[symbol];
+        results.push({
+          chain: wallet.chain, address: wallet.address, symbol, balance, walletIndex,
+          // Balance itself is fixed (only mint/burn/send/bridge change it) —
+          // these are just its current real-world value at today's rate,
+          // computed fresh every call, never stored.
+          valueUsd: price ? Number(balance) * price.usd : null,
+          valueInr: price ? Number(balance) * price.inr : null,
+        });
       }
     }
 
     return results;
+  }
+
+  // Live prices come from stablecoin-service (service-to-service, not
+  // through the gateway — this is public market data with no user-specific
+  // info, same as what the public dashboard shows). Cached briefly here so
+  // a burst of balance checks across many users doesn't hammer that
+  // endpoint (which itself caches upstream in Redis) on every request.
+  private livePricesCache: { data: any; expiresAt: number } | null = null;
+  private async getLivePricesCached(): Promise<Record<string, { usd: number; inr: number }> | null> {
+    if (this.livePricesCache && this.livePricesCache.expiresAt > Date.now()) {
+      return this.livePricesCache.data;
+    }
+    try {
+      const url = process.env.STABLECOIN_SERVICE_URL ?? 'http://localhost:3005';
+      const res = await axios.get(`${url}/stablecoin/live-prices`, { timeout: 8000 });
+      const prices = res.data?.prices ?? null;
+      this.livePricesCache = { data: prices, expiresAt: Date.now() + 15_000 };
+      return prices;
+    } catch (err: any) {
+      this.logger.warn(`Failed to fetch live prices from stablecoin-service: ${err.message}`);
+      // Balances still work without pricing — valueUsd/valueInr just come
+      // back null rather than failing the whole balance check.
+      return this.livePricesCache?.data ?? null;
+    }
   }
 
   async sendToken(userId: string, dto: SendTokenDto & { walletIndex?: number }) {

@@ -78,3 +78,26 @@ export class StablecoinController {
     return this.svc.burnTokens(dto, req.user.sub);
   }
 }
+
+// Separate, UNGUARDED controller for live market prices — this is the same
+// public market data already shown on the public dashboard (no user-specific
+// info), so it doesn't require a JWT. wallet-service calls this directly
+// (service-to-service, not through the gateway) to compute each holding's
+// current market value without touching on-chain balances.
+@ApiTags('Stablecoin')
+@Controller('stablecoin')
+export class PriceController {
+  constructor(private svc: StablecoinService) {}
+
+  @Get('live-prices')
+  @ApiOperation({
+    summary: 'Live USD/INR rate + per-token market prices (INRX/EGOLD/ESLVR)',
+    description:
+      'Token quantities are fixed — only their value floats with real-world INR/gold/silver ' +
+      'prices. This is what wallet-service multiplies against each holding\'s balance to show ' +
+      'current market value, and mirrors the same pricing logic used by the public dashboard.',
+  })
+  livePrices() {
+    return this.svc.getLivePrices();
+  }
+}

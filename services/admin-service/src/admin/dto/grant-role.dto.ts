@@ -1,7 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsString, IsNotEmpty, IsIn } from 'class-validator';
 
-const CHAINS = ['ethereum', 'bsc', 'polygon'] as const;
+const CHAINS = ['ethereum', 'bsc', 'polygon', 'tron'] as const;
 const CONTRACTS = ['INRX', 'EGOLD', 'ESLVR', 'TREASURY_TIMELOCK', 'BRIDGE_V2', 'RESERVE_VAULT', 'ORACLE_MANAGER'] as const;
 
 export class GrantRoleDto {

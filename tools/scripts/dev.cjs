@@ -11,6 +11,7 @@ const services = [
   { name: 'auth',          dir: 'services/auth-service',         port: 3002, color: '\x1b[32m' },
   { name: 'wallet',        dir: 'services/wallet-service',       port: 3003, color: '\x1b[33m' },
   { name: 'stablecoin',    dir: 'services/stablecoin-service',   port: 3005, color: '\x1b[34m' },
+  { name: 'swap',          dir: 'services/swap-service',         port: 3016, color: '\x1b[1;36m' },
   { name: 'treasury',      dir: 'services/treasury-service',     port: 3006, color: '\x1b[31m' },
   { name: 'reserve',       dir: 'services/reserve-service',      port: 3007, color: '\x1b[37m' },
   { name: 'payment',       dir: 'services/payment-service',      port: 3008, color: '\x1b[92m' },
@@ -159,7 +160,7 @@ async function main() {
       'merchant-service':     3009, 'kyc-service':          3010,
       'notification-service': 3011, 'analytics-service':    3012,
       'fraud-service':        3013, 'listener-service':     3014,
-      'admin-service':        3015,
+      'admin-service':        3015, 'swap-service':         3016,
     };
 
     const rootEnv = fs.readFileSync(path.join(root, '.env'), 'utf8');

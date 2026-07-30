@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ethers } from 'ethers';
+import { TronWeb } from 'tronweb';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService }  from '../redis/redis.service';
 import { UpdateRoleDto } from './dto/update-role.dto';
@@ -30,7 +31,7 @@ const CONTRACT_REGISTRY: Record<string, { label: string; envSuffix: string; role
   ORACLE_MANAGER:    { label: 'OracleManager',      envSuffix: 'ORACLE_MANAGER_ADDRESS',     roles: ['ORACLE_ROLE', 'MANAGER_ROLE'] },
 };
 
-const EVM_CHAIN_PREFIX: Record<string, string> = { ethereum: 'ETH', bsc: 'BSC', polygon: 'POLYGON' };
+const CHAIN_PREFIX: Record<string, string> = { ethereum: 'ETH', bsc: 'BSC', polygon: 'POLYGON', tron: 'TRON' };
 const EVM_RPC_ENV: Record<string, string> = { ethereum: 'ETH_RPC', bsc: 'BSC_RPC', polygon: 'POLYGON_RPC' };
 
 const ACCESS_CONTROL_ABI = [
@@ -318,7 +319,7 @@ export class AdminService {
 
   getRoleRegistry() {
     return {
-      chains: Object.keys(EVM_CHAIN_PREFIX),
+      chains: Object.keys(CHAIN_PREFIX),
       contracts: Object.entries(CONTRACT_REGISTRY).map(([key, v]) => ({
         key, label: v.label, roles: v.roles,
       })),
@@ -326,13 +327,33 @@ export class AdminService {
   }
 
   private getContractAddress(chain: string, contractKey: string): string {
-    const prefix = EVM_CHAIN_PREFIX[chain];
+    const prefix = CHAIN_PREFIX[chain];
     if (!prefix) throw new BadRequestException(`Unsupported chain for on-chain roles: ${chain}`);
     const entry = CONTRACT_REGISTRY[contractKey];
     if (!entry) throw new BadRequestException(`Unknown contract: ${contractKey}`);
     const address = process.env[`${prefix}_${entry.envSuffix}`];
     if (!address) throw new BadRequestException(`${entry.label} is not configured on ${chain}`);
     return address;
+  }
+
+  // Cached — one provider per chain, reused across calls, with an explicit
+  // static network so ethers skips its auto-detect handshake (the source of
+  // the "JsonRpcProvider failed to detect network... retry in 1s" spam when
+  // a fresh provider's detection call fails or gets rate-limited).
+  private readonly providerCache = new Map<string, ethers.JsonRpcProvider>();
+  private static readonly CHAIN_IDS: Record<string, number> = {
+    ethereum: 11155111, bsc: 97, polygon: 80002,
+  };
+
+  private getCachedProvider(chain: string, rpcUrl: string): ethers.JsonRpcProvider {
+    const cached = this.providerCache.get(chain);
+    if (cached) return cached;
+    const chainId = AdminService.CHAIN_IDS[chain];
+    const provider = chainId
+      ? new ethers.JsonRpcProvider(rpcUrl, chainId, { staticNetwork: true })
+      : new ethers.JsonRpcProvider(rpcUrl);
+    this.providerCache.set(chain, provider);
+    return provider;
   }
 
   private getDeployerSigner(chain: string): ethers.Wallet {
@@ -343,8 +364,20 @@ export class AdminService {
     const deployerKey = process.env.DEPLOYER_PRIVATE_KEY;
     if (!deployerKey) throw new Error('DEPLOYER_PRIVATE_KEY not configured — cannot administer on-chain roles');
 
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const provider = this.getCachedProvider(chain, rpcUrl);
     return new ethers.Wallet(deployerKey, provider);
+  }
+
+  private getTronContract(contractAddress: string) {
+    const deployerKey = process.env.DEPLOYER_TRON_PRIVATE_KEY;
+    if (!deployerKey) throw new Error('DEPLOYER_TRON_PRIVATE_KEY not configured — cannot administer on-chain roles on TRON');
+
+    const tronWeb = new TronWeb({
+      fullHost:   process.env.TRON_RPC!,
+      privateKey: deployerKey,
+      headers:    { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+    });
+    return tronWeb.contract().at(contractAddress);
   }
 
   private assertValidRole(contractKey: string, roleName: string) {
@@ -360,17 +393,30 @@ export class AdminService {
     actingUserId: string, action: 'grant' | 'revoke',
   ) {
     this.assertValidRole(contractKey, roleName);
-    if (!ethers.isAddress(targetAddress)) throw new BadRequestException('Invalid target address');
-
     const contractAddress = this.getContractAddress(chain, contractKey);
-    const signer   = this.getDeployerSigner(chain);
-    const contract = new ethers.Contract(contractAddress, ACCESS_CONTROL_ABI, signer);
     const roleHash = ethers.keccak256(ethers.toUtf8Bytes(roleName));
 
-    const tx = action === 'grant'
-      ? await contract.grantRole(roleHash, targetAddress)
-      : await contract.revokeRole(roleHash, targetAddress);
-    const receipt = await tx.wait();
+    let txHash: string;
+
+    if (chain === 'tron') {
+      // TRON addresses come in as base58 (T...) — TronWeb's contract interface
+      // accepts that directly, no conversion needed for a plain call like this
+      // (only off-chain message-hash signing, elsewhere, needs the raw hex form).
+      if (!targetAddress || targetAddress.length < 25) throw new BadRequestException('Invalid TRON target address');
+      const contract = await this.getTronContract(contractAddress);
+      txHash = action === 'grant'
+        ? await contract.grantRole(roleHash, targetAddress).send({ feeLimit: 100_000_000 })
+        : await contract.revokeRole(roleHash, targetAddress).send({ feeLimit: 100_000_000 });
+    } else {
+      if (!ethers.isAddress(targetAddress)) throw new BadRequestException('Invalid target address');
+      const signer   = this.getDeployerSigner(chain);
+      const contract = new ethers.Contract(contractAddress, ACCESS_CONTROL_ABI, signer);
+      const tx = action === 'grant'
+        ? await contract.grantRole(roleHash, targetAddress)
+        : await contract.revokeRole(roleHash, targetAddress);
+      const receipt = await tx.wait();
+      txHash = receipt.hash;
+    }
 
     await this.prisma.auditLog.create({
       data: {
@@ -378,16 +424,16 @@ export class AdminService {
         action:     action === 'grant' ? 'ADMIN_GRANT_ONCHAIN_ROLE' : 'ADMIN_REVOKE_ONCHAIN_ROLE',
         entityType: 'OnChainRole',
         entityId:   `${chain}:${contractKey}:${roleName}`,
-        payload:    { chain, contract: contractKey, role: roleName, target: targetAddress, txHash: receipt.hash },
+        payload:    { chain, contract: contractKey, role: roleName, target: targetAddress, txHash },
       },
     });
 
     this.logger.warn(
-      `${action.toUpperCase()} ${roleName} on ${CONTRACT_REGISTRY[contractKey].label}/${chain} for ${targetAddress} by ${actingUserId} (tx ${receipt.hash})`
+      `${action.toUpperCase()} ${roleName} on ${CONTRACT_REGISTRY[contractKey].label}/${chain} for ${targetAddress} by ${actingUserId} (tx ${txHash})`
     );
 
     return {
-      txHash: receipt.hash, status: 'CONFIRMED',
+      txHash, status: 'CONFIRMED',
       chain, contract: contractKey, role: roleName, target: targetAddress, action,
     };
   }
@@ -402,29 +448,49 @@ export class AdminService {
 
   async checkOnChainRole(chain: string, contractKey: string, roleName: string, targetAddress: string) {
     this.assertValidRole(contractKey, roleName);
-    if (!ethers.isAddress(targetAddress)) throw new BadRequestException('Invalid address');
-
     const contractAddress = this.getContractAddress(chain, contractKey);
-    const rpcUrl = process.env[EVM_RPC_ENV[chain]]!;
-    const provider = new ethers.JsonRpcProvider(rpcUrl);
-    const contract = new ethers.Contract(contractAddress, ACCESS_CONTROL_ABI, provider);
     const roleHash = ethers.keccak256(ethers.toUtf8Bytes(roleName));
+
+    if (chain === 'tron') {
+      if (!targetAddress || targetAddress.length < 25) throw new BadRequestException('Invalid TRON address');
+      // TronWeb throws "owner_address isn't set" on ANY contract call —
+      // including pure view/read calls like hasRole() — unless the instance
+      // has a default address configured. It doesn't need to be able to
+      // sign anything for a read; reusing the deployer's key here just gives
+      // TronWeb an owner_address to attach to the call, it has no bearing
+      // on the (read-only) result itself.
+      const deployerKey = process.env.DEPLOYER_TRON_PRIVATE_KEY;
+      if (!deployerKey) throw new Error('DEPLOYER_TRON_PRIVATE_KEY not configured — needed even for read-only TRON calls');
+      const tronWeb = new TronWeb({
+        fullHost:   process.env.TRON_RPC!,
+        privateKey: deployerKey,
+        headers:    { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+      });
+      const contract = await tronWeb.contract().at(contractAddress);
+      const hasRole = await contract.hasRole(roleHash, targetAddress).call();
+      return { chain, contract: contractKey, role: roleName, target: targetAddress, hasRole };
+    }
+
+    if (!ethers.isAddress(targetAddress)) throw new BadRequestException('Invalid address');
+    const rpcUrl = process.env[EVM_RPC_ENV[chain]]!;
+    const provider = this.getCachedProvider(chain, rpcUrl);
+    const contract = new ethers.Contract(contractAddress, ACCESS_CONTROL_ABI, provider);
 
     const hasRole = await contract.hasRole(roleHash, targetAddress);
     return { chain, contract: contractKey, role: roleName, target: targetAddress, hasRole };
   }
 
   // Requirement #1: a SUPER_ADMIN automatically gets EVERY role, on EVERY
-  // contract, on EVERY EVM chain, for each of their own wallets. Sequential
-  // on-chain transactions — can take a while for many wallets/contracts/roles,
-  // so callers (updateRole, and the manual re-sync endpoint) run this in the
-  // background rather than awaiting it inline.
+  // contract, on EVERY chain (EVM + TRON), for each of their own wallets.
+  // Sequential on-chain transactions — can take a while for many
+  // wallets/contracts/roles, so callers (updateRole, and the manual re-sync
+  // endpoint) run this in the background rather than awaiting it inline.
   async grantAllRolesToUser(userId: string, actingUserId: string) {
     const wallets = await this.prisma.wallet.findMany({
-      where: { userId, chain: { in: Object.keys(EVM_CHAIN_PREFIX) } },
+      where: { userId, chain: { in: Object.keys(CHAIN_PREFIX) } },
     });
     if (!wallets.length) {
-      throw new BadRequestException('User has no EVM wallet yet — they must create a wallet before roles can be granted');
+      throw new BadRequestException('User has no wallet yet — they must create one before roles can be granted');
     }
 
     const results: Array<Record<string, any>> = [];

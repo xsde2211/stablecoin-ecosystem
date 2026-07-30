@@ -4,12 +4,13 @@ import {
 } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ethers }        from 'ethers';
+import { TronWeb }       from 'tronweb';
 import axios              from 'axios';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService }  from '../redis/redis.service';
 import { MintDto }       from './dto/mint.dto';
 import { BurnDto }       from './dto/burn.dto';
-import { TxType } from '@prisma/client';
+import { TxType} from '@prisma/client';
 
 // Full token ABI matching our INRX/EGold/ESilver contracts
 const TOKEN_ABI = [
@@ -63,19 +64,9 @@ export class StablecoinService implements OnModuleInit {
   async onModuleInit() {
     // Push a live price immediately at boot so the app isn't stuck showing
     // the stale deploy-time price for up to 5 minutes after a restart.
-    // If the app happens to start during a network blip (as seen with a
-    // full DNS outage taking out every external host at once), give it one
-    // delayed retry rather than silently waiting for the next 5-minute
-    // cron tick — a boot-time hiccup is usually gone within a few seconds.
-    this.updateAllLiveOraclePrices().catch(async (err) => {
-      this.logger.warn(`Initial live price push failed (${err.message}), retrying once in 15s`);
-      await new Promise(r => setTimeout(r, 15000));
-      try {
-        await this.updateAllLiveOraclePrices();
-      } catch (err2: any) {
-        this.logger.error(`Initial live price push retry also failed: ${err2.message} — will pick up on the next 5-minute cycle`);
-      }
-    });
+    this.updateAllLiveOraclePrices().catch(err =>
+      this.logger.error(`Initial live price push failed: ${err.message}`)
+    );
   }
 
   // ─── Token info for single chain ──────────────────────────────────────────
@@ -85,8 +76,15 @@ export class StablecoinService implements OnModuleInit {
     const provider = this.getProvider(chain);
     const contract = new ethers.Contract(address, TOKEN_ABI, provider);
 
-    const [supply, mintCap, paused, totalMinted, totalBurned, circulating] =
-      await Promise.all([
+    // THE FIX: this used to be Promise.all(), so ANY single call failing —
+    // e.g. EGOLD/ESLVR's deployed contract not implementing mintCap()/
+    // totalMinted()/totalBurned()/circulatingSupply() the way INRX's does —
+    // took down the entire request with a 500, even though totalSupply()
+    // and paused() work fine on every token. Promise.allSettled() lets each
+    // call fail independently; whatever a given contract doesn't support
+    // just comes back as null instead of erroring the whole endpoint.
+    const [supplyR, mintCapR, pausedR, totalMintedR, totalBurnedR, circulatingR] =
+      await Promise.allSettled([
         contract.totalSupply(),
         contract.mintCap(),
         contract.paused(),
@@ -95,19 +93,38 @@ export class StablecoinService implements OnModuleInit {
         contract.circulatingSupply(),
       ]);
 
+    const value = <T,>(r: PromiseSettledResult<T>): T | null =>
+      r.status === 'fulfilled' ? r.value : null;
+
+    const supply      = value(supplyR);
+    const mintCap      = value(mintCapR);
+    const paused       = value(pausedR);
+    const totalMinted  = value(totalMintedR);
+    const totalBurned  = value(totalBurnedR);
+    const circulating  = value(circulatingR);
+
+    if (supply === null) {
+      // totalSupply() failing means this isn't a "missing extra feature"
+      // situation — the contract address itself is probably wrong for
+      // this token/chain. Worth still surfacing as a real error here.
+      throw new BadRequestException(`Unable to read ${token} on ${chain} — check the contract address is correct`);
+    }
+
+    const fmt = (v: bigint | null) => v !== null ? ethers.formatUnits(v, 6) : null;
+
     return {
       token,
       chain,
       address,
-      totalSupply:      ethers.formatUnits(supply,      6),
-      circulatingSupply:ethers.formatUnits(circulating, 6),
-      mintCap:          ethers.formatUnits(mintCap,     6),
-      totalMinted:      ethers.formatUnits(totalMinted, 6),
-      totalBurned:      ethers.formatUnits(totalBurned, 6),
-      paused,
-      utilizationPct:   mintCap > 0n
+      totalSupply:       fmt(supply),
+      circulatingSupply: fmt(circulating),
+      mintCap:           fmt(mintCap),
+      totalMinted:       fmt(totalMinted),
+      totalBurned:       fmt(totalBurned),
+      paused:            paused ?? false,
+      utilizationPct:    mintCap !== null && mintCap > 0n
         ? ((Number(supply) / Number(mintCap)) * 100).toFixed(2) + '%'
-        : '0%',
+        : null,
     };
   }
 
@@ -136,7 +153,7 @@ export class StablecoinService implements OnModuleInit {
 
   // ─── Live price feed — real gold/silver market prices, pushed on-chain ─────
   //
-  // Runs every 10 minutes (plus once at startup via onModuleInit). Fetches:
+  // Runs every 5 minutes (plus once at startup via onModuleInit). Fetches:
   //   1. Live spot price of gold/silver in USD per troy ounce (gold-api.com —
   //      free, no API key required)
   //   2. Live USD→INR exchange rate (open.er-api.com — free, no API key)
@@ -177,137 +194,113 @@ export class StablecoinService implements OnModuleInit {
     }
   }
 
+  private static readonly ORACLE_PUSH_THRESHOLD_PCT = 0.3; // 0.3%
+
   async updateAllLiveOraclePrices() {
-    const usdToInr = await this.fetchUsdToInrRate();
+  const usdToInr = await this.fetchUsdToInrRate();
 
-    for (const token of ['EGOLD', 'ESLVR']) {
-      const usdPerOz = await this.fetchSpotPriceUsdPerOz(StablecoinService.METAL_SYMBOL[token]);
-      const inrPerGram = (usdPerOz * usdToInr) / StablecoinService.GRAMS_PER_TROY_OUNCE;
+  for (const token of ['EGOLD', 'ESLVR']) {
+    const usdPerOz = await this.fetchSpotPriceUsdPerOz(StablecoinService.METAL_SYMBOL[token]);
+    const inrPerGram = (usdPerOz * usdToInr) / StablecoinService.GRAMS_PER_TROY_OUNCE;
 
-      for (const chain of CHAINS) {
-        try {
-          await this.pushOraclePriceFromAllOracles(token, chain, inrPerGram);
-        } catch (err: any) {
-          // One chain misconfigured/unreachable shouldn't block the others
-          this.logger.warn(`Oracle push failed [${token}/${chain}]: ${err.message}`);
-        }
+    // ─── Fluctuation check — decided ONCE per token, before the per-chain loop ───
+    const lastPriceKey = `lastOraclePrice:${token}`;
+    const lastPriceRaw = await this.redis.get(lastPriceKey).catch(() => null);
+    const lastPrice = lastPriceRaw ? parseFloat(lastPriceRaw) : null;
+
+    if (lastPrice !== null) {
+      const changePct = (Math.abs(inrPerGram - lastPrice) / lastPrice) * 100;
+      if (changePct < StablecoinService.ORACLE_PUSH_THRESHOLD_PCT) {
+        this.logger.log(
+          `[${token}] Skipped push — ₹${inrPerGram.toFixed(2)}/gram is only ${changePct.toFixed(3)}% ` +
+          `off the last pushed ₹${lastPrice.toFixed(2)}/gram (threshold: ${StablecoinService.ORACLE_PUSH_THRESHOLD_PCT}%)`
+        );
+        continue; // skip all chains for this token this cycle
       }
     }
+
+    for (const chain of CHAINS) {
+      try {
+        await this.pushOraclePriceFromAllOracles(token, chain, inrPerGram);
+      } catch (err: any) {
+        this.logger.warn(`Oracle push failed [${token}/${chain}]: ${err.message}`);
+      }
+    }
+
+    // Record what we just pushed so the next cron cycle has something to
+    // compare against. No TTL — this should persist indefinitely until
+    // overwritten by the next actual push, not expire between hourly runs.
+    await this.redis.set(lastPriceKey, inrPerGram.toString()).catch(() => {});
+  }
+}
+
+  // ─── Prices — sourced from the dashboard's own API (single source of truth) ───
+  //
+  // Per the product spec: stablecoin-service now uses the SAME price API the
+  // dashboard frontend calls, instead of each hitting CoinGecko/gold-api.com
+  // independently. This means one place to fix pricing formulas/spreads
+  // (dashboard/api/*.ts) instead of two implementations that can silently
+  // drift apart — which is exactly what started happening before this change
+  // (this file had its own copy of the Tether-spread logic that had to be
+  // manually kept in sync with the dashboard's).
+  private static readonly DASHBOARD_API_URL =
+    process.env.DASHBOARD_API_URL ?? 'https://stablecoin-ecosystem.vercel.app';
+
+  private async fetchDashboardPrices(): Promise<{
+    usdInr: number; goldUsdPerGram: number; goldInrPerGram: number;
+    silverUsdPerGram: number; silverInrPerGram: number;
+  }> {
+    const cacheKey = 'livePrice:dashboardPrices';
+    const cached = await this.redis.get(cacheKey).catch(() => null);
+    if (cached) return JSON.parse(cached);
+
+    const res = await axios.get(`${StablecoinService.DASHBOARD_API_URL}/api/prices`, { timeout: 10000 });
+    const data = res.data;
+    if (!data?.usdInr || !data?.goldUsdPerGram || !data?.silverUsdPerGram) {
+      throw new Error('Invalid response from dashboard price API');
+    }
+
+    // Still cached here too (short TTL) — the dashboard's own endpoint
+    // already caches upstream, this just saves a network hop on our side
+    // when the 5-min oracle cron and any live API request land close together.
+    await this.redis.set(cacheKey, JSON.stringify(data), 60).catch(() => {});
+    return data;
   }
 
   private async fetchSpotPriceUsdPerOz(metalSymbol: string): Promise<number> {
-    const cacheKey  = `livePrice:${metalSymbol}`;
-    const staleKey  = `livePrice:${metalSymbol}:stale`; // long-lived, no short TTL
-    const cached = await this.redis.get(cacheKey).catch(() => null);
-    if (cached) return parseFloat(cached);
-
-    try {
-      const price = await this.fetchWithRetry(
-        async () => {
-          const res = await axios.get(`https://api.gold-api.com/price/${metalSymbol}`, { timeout: 10000 });
-          const p = Number(res.data?.price);
-          if (!p || p <= 0) throw new Error(`Invalid spot price response for ${metalSymbol}`);
-          return p;
-        },
-        `spot price [${metalSymbol}]`,
-      );
-
-      // Cache for 4 minutes — cushions against the 5-min cron overlapping a rate limit
-      await this.redis.set(cacheKey, price.toString(), 240).catch(() => {});
-      // Also keep a long-lived copy purely as an emergency fallback (24h) —
-      // used only if a future fetch fails outright (see catch below).
-      await this.redis.set(staleKey, price.toString(), 86400).catch(() => {});
-      return price;
-    } catch (err: any) {
-      // Live fetch + retries all failed (e.g. a DNS/network blip). Rather
-      // than skip pushing a price for this whole 5-minute cycle, fall back
-      // to the last known-good price if we have one recent enough to still
-      // be reasonable — better an hour-old gold price than no price update
-      // at all. If there's nothing usable, we genuinely have to give up.
-      const stale = await this.redis.get(staleKey).catch(() => null);
-      if (stale) {
-        this.logger.warn(`Spot price fetch failed for ${metalSymbol} (${err.message}) — using last known price as fallback`);
-        return parseFloat(stale);
-      }
-      throw err;
-    }
+    const prices = await this.fetchDashboardPrices();
+    if (metalSymbol === 'XAU') return prices.goldUsdPerGram * StablecoinService.GRAMS_PER_TROY_OUNCE;
+    if (metalSymbol === 'XAG') return prices.silverUsdPerGram * StablecoinService.GRAMS_PER_TROY_OUNCE;
+    throw new Error(`Unknown metal symbol: ${metalSymbol}`);
   }
 
   private async fetchUsdToInrRate(): Promise<number> {
-    const cacheKey = 'livePrice:usdInr';
-    const staleKey = 'livePrice:usdInr:stale';
-    const cached = await this.redis.get(cacheKey).catch(() => null);
-    if (cached) return parseFloat(cached);
-
-    try {
-      const rate = await this.fetchWithRetry(
-        () => this.fetchUsdToInrPrimary(),
-        'USD/INR rate (primary)',
-        // On the primary provider's final failure, try a second independent
-        // provider before giving up entirely — two providers failing at
-        // once is far less likely than one.
-        () => this.fetchWithRetry(() => this.fetchUsdToInrFallback(), 'USD/INR rate (fallback)'),
-      );
-
-      await this.redis.set(cacheKey, rate.toString(), 240).catch(() => {});
-      await this.redis.set(staleKey, rate.toString(), 86400).catch(() => {});
-      return rate;
-    } catch (err: any) {
-      const stale = await this.redis.get(staleKey).catch(() => null);
-      if (stale) {
-        this.logger.warn(`USD/INR rate fetch failed (${err.message}) — using last known rate as fallback`);
-        return parseFloat(stale);
-      }
-      throw err;
-    }
+    const prices = await this.fetchDashboardPrices();
+    return prices.usdInr;
   }
 
-  private async fetchUsdToInrPrimary(): Promise<number> {
-    const res  = await axios.get('https://open.er-api.com/v6/latest/USD', { timeout: 10000 });
-    const rate = Number(res.data?.rates?.INR);
-    if (!rate || rate <= 0) throw new Error('Invalid USD/INR rate response');
-    return rate;
-  }
+  // ─── Live prices API — powers the fixed-quantity / floating-value model ───
+  //
+  // Per the updated product spec: a user's token QUANTITY never changes on
+  // its own (only explicit mint/burn/send/bridge changes it) — what floats
+  // is the token's real-world VALUE, computed fresh from live market data
+  // every time this is called. 1 INRX tracks 1 INR of value, so its USD
+  // price is just the USD/INR rate inverted; 1 EGOLD/ESLVR tracks 1 gram of
+  // gold/silver. wallet-service calls this to compute each holding's
+  // current market value without ever touching the on-chain balance.
+  async getLivePrices() {
+    const { usdInr, goldUsdPerGram, goldInrPerGram, silverUsdPerGram, silverInrPerGram } =
+      await this.fetchDashboardPrices();
 
-  // frankfurter.app (ECB-backed, free, no key) — only refreshes on ECB
-  // business days, so it's a bit less "live" than open.er-api, but that's
-  // an acceptable trade-off for an emergency fallback that only kicks in
-  // when the primary source is unreachable.
-  private async fetchUsdToInrFallback(): Promise<number> {
-    const res  = await axios.get('https://api.frankfurter.app/latest?from=USD&to=INR', { timeout: 10000 });
-    const rate = Number(res.data?.rates?.INR);
-    if (!rate || rate <= 0) throw new Error('Invalid USD/INR fallback rate response');
-    return rate;
-  }
-
-  // Retries transient network failures (DNS hiccups, timeouts, connection
-  // resets, 5xx) a couple of times with a short delay — most outages like
-  // the "getaddrinfo EAI_AGAIN" DNS blip are gone within a second or two,
-  // so it's worth trying again before falling all the way back to stale
-  // cache or a second provider. Non-transient errors (bad response shape,
-  // 4xx) fail fast since retrying won't help.
-  private async fetchWithRetry<T>(
-    fn: () => Promise<T>,
-    label: string,
-    onExhausted?: () => Promise<T>,
-    attempts = 3,
-  ): Promise<T> {
-    let lastErr: any;
-    for (let i = 1; i <= attempts; i++) {
-      try {
-        return await fn();
-      } catch (err: any) {
-        lastErr = err;
-        const transient =
-          ['EAI_AGAIN', 'ENOTFOUND', 'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED'].includes(err?.code) ||
-          (err?.response?.status ?? 0) >= 500;
-        if (!transient || i === attempts) break;
-        this.logger.debug(`${label} fetch failed (${err.message}), retrying (${i}/${attempts - 1})…`);
-        await new Promise(r => setTimeout(r, 1500 * i));
-      }
-    }
-    if (onExhausted) return onExhausted();
-    throw lastErr;
+    return {
+      usdInr,
+      prices: {
+        INRX:  { usd: 1 / usdInr,       inr: 1 },
+        EGOLD: { usd: goldUsdPerGram,   inr: goldInrPerGram },
+        ESLVR: { usd: silverUsdPerGram, inr: silverInrPerGram },
+      },
+      updatedAt: new Date().toISOString(),
+    };
   }
 
   // Submits the same live price independently from each configured oracle
@@ -324,37 +317,14 @@ export class StablecoinService implements OnModuleInit {
 
     const results = await Promise.allSettled(
       this.oraclePrivateKeys.map(async (key, i) => {
-        const signer = new ethers.Wallet(key, provider);
-        const oracle = new ethers.Contract(oracleAddr, ORACLE_ABI, signer);
-
-        // Get current on-chain price
-        const [currentPrice] = await oracle.getPriceSafe(tokenId);
-
-        // First update after deployment
-        if (currentPrice > 0n) {
-          const diff =
-            currentPrice > priceScaled
-              ? currentPrice - priceScaled
-              : priceScaled - currentPrice;
-
-          const percent =
-            Number(diff * 10000n / currentPrice) / 100;
-
-          if (percent < 0.5) {
-            this.logger.log(
-              `[${chain}] Skipping ${token}. Price changed only ${percent.toFixed(2)}%`
-            );
-            return;
-          }
-        }
-
-        // Only send transaction if price changed enough
-        const tx = await oracle.updatePrice(tokenId, priceScaled);
+        const signer  = new ethers.Wallet(key, provider);
+        const oracle  = new ethers.Contract(oracleAddr, ORACLE_ABI, signer);
+        const tx      = await oracle.updatePrice(tokenId, priceScaled);
         const receipt = await tx.wait();
-
         this.logger.log(
-          `[${chain}] Oracle ${i + 1} pushed ${token} (tx ${receipt.hash})`
+          `[${chain}] Oracle ${i + 1} (${signer.address}) pushed ${token} = ₹${inrPerGram.toFixed(2)}/gram (tx ${receipt.hash})`
         );
+        return receipt.hash;
       })
     );
 
@@ -451,83 +421,110 @@ export class StablecoinService implements OnModuleInit {
 
   async mintTokens(dto: MintDto, requestedBy: string) {
     this.logger.warn(`Direct mint called by ${requestedBy} — bypasses timelock!`);
+
+    if (dto.chain === 'tron') {
+      const txHash = await this.mintTronTokens(dto);
+      await this.recordTx(txHash, dto.chain, 'MINT', dto.amount, dto.token, 'treasury', dto.toAddress, requestedBy);
+      this.logger.log(`Minted ${dto.amount} ${dto.token} to ${dto.toAddress} on tron`);
+      return { txHash, status: 'CONFIRMED' };
+    }
+
     const address  = this.getTokenAddress(dto.token, dto.chain);
     const provider = this.getProvider(dto.chain);
 
-    // Support either env var name — the old code only read MINTER_PRIVATE_KEY
-    // but its error message referenced SIGNER_1_PRIVATE_KEY instead, which
-    // made a genuinely-missing key very confusing to diagnose. Falling back
-    // to SIGNER_1_PRIVATE_KEY also means one signer key can double as both,
-    // if that's how the account is actually configured.
-    const minterKey = process.env.MINTER_PRIVATE_KEY ?? process.env.SIGNER_1_PRIVATE_KEY;
-    if (!minterKey) {
-      throw new BadRequestException('MINTER_PRIVATE_KEY (or SIGNER_1_PRIVATE_KEY) not set — cannot mint directly');
-    }
+    const minterKey = process.env.MINTER_PRIVATE_KEY;
+    if (!minterKey) throw new BadRequestException('SIGNER_1_PRIVATE_KEY not set — cannot mint directly');
 
     const signer   = new ethers.Wallet(minterKey, provider);
+    console.log("Signer Address:", signer.address);
     const contract = new ethers.Contract(address, TOKEN_ABI, signer);
     const paused   = await contract.paused();
     if (paused) throw new BadRequestException(`${dto.token} is paused on ${dto.chain}`);
 
-    const parsed = ethers.parseUnits(dto.amount, 6);
+    const parsed  = ethers.parseUnits(dto.amount, 6);
+    const tx      = await contract.mint(dto.toAddress, parsed, dto.reason);
+    const receipt = await tx.wait();
 
-    // IMPORTANT: only await the transaction being *submitted* (tx.hash is
-    // available as soon as it's broadcast to the mempool) — NOT full
-    // on-chain confirmation (tx.wait()). Waiting for confirmation here
-    // regularly took longer than the gateway's 30s proxy timeout, so every
-    // mint looked like a 502 "service unavailable" from the gateway even
-    // though it actually succeeded on-chain a few seconds later — the
-    // request was killed client-side before stablecoin-service could ever
-    // respond. This now matches how wallet-service.sendToken() already
-    // works: respond PENDING immediately, confirm in the background.
-    let tx;
-    try {
-      tx = await contract.mint(dto.toAddress, parsed, dto.reason);
-    } catch (err: any) {
-      throw new BadRequestException(
-        err?.reason ?? err?.shortMessage ?? err?.message ?? 'Mint transaction failed to submit'
-      );
-    }
-
-    const wallet = await this.recordTx(
-      tx.hash, dto.chain, 'MINT', dto.amount, dto.token, 'treasury', dto.toAddress, requestedBy, 'PENDING'
-    );
-    this.confirmTxInBackground(tx, wallet?.id, dto.chain, 'MINT');
-
-    this.logger.log(`Mint submitted: ${tx.hash} for ${dto.amount} ${dto.token} to ${dto.toAddress} on ${dto.chain}`);
-    return { txHash: tx.hash, status: 'PENDING' };
+    await this.recordTx(receipt.hash, dto.chain, 'MINT', dto.amount, dto.token, 'treasury', dto.toAddress, requestedBy);
+    this.logger.log(`Minted ${dto.amount} ${dto.token} to ${dto.toAddress} on ${dto.chain}`);
+    return { txHash:receipt.hash, status:'CONFIRMED' };
   }
 
   // ─── Burn (direct) ─────────────────────────────────────────────────────────
 
   async burnTokens(dto: BurnDto, requestedBy: string) {
+    if (dto.chain === 'tron') {
+      const txHash = await this.burnTronTokens(dto);
+      await this.recordTx(txHash, dto.chain, 'BURN', dto.amount, dto.token, dto.fromAddress, 'treasury', requestedBy);
+      this.logger.log(`Burned ${dto.amount} ${dto.token} from ${dto.fromAddress} on tron`);
+      return { txHash, status: 'CONFIRMED' };
+    }
+
     const address  = this.getTokenAddress(dto.token, dto.chain);
     const provider = this.getProvider(dto.chain);
 
-    const burnerKey = process.env.SIGNER_1_PRIVATE_KEY;
-    if (!burnerKey) throw new BadRequestException('SIGNER_1_PRIVATE_KEY not set — cannot burn directly');
+    const burnerKey = process.env.BURNER_PRIVATE_KEY;
+    if (!burnerKey) throw new BadRequestException('BURNER_PRIVATE_KEY not set — cannot burn directly');
 
     const signer   = new ethers.Wallet(burnerKey, provider);
     const contract = new ethers.Contract(address, TOKEN_ABI, signer);
     const parsed   = ethers.parseUnits(dto.amount, 6);
+    const tx       = await contract.burn(dto.fromAddress, parsed, dto.reason);
+    const receipt  = await tx.wait();
 
-    // Same fix as mintTokens: don't block the HTTP response on tx.wait().
-    let tx;
-    try {
-      tx = await contract.burn(dto.fromAddress, parsed, dto.reason);
-    } catch (err: any) {
-      throw new BadRequestException(
-        err?.reason ?? err?.shortMessage ?? err?.message ?? 'Burn transaction failed to submit'
-      );
-    }
+    await this.recordTx(receipt.hash, dto.chain, 'BURN', dto.amount, dto.token, dto.fromAddress, 'treasury', requestedBy);
+    this.logger.log(`Burned ${dto.amount} ${dto.token} from ${dto.fromAddress} on ${dto.chain}`);
+    return { txHash:receipt.hash, status:'CONFIRMED' };
+  }
 
-    const wallet = await this.recordTx(
-      tx.hash, dto.chain, 'BURN', dto.amount, dto.token, dto.fromAddress, 'treasury', requestedBy, 'PENDING'
-    );
-    this.confirmTxInBackground(tx, wallet?.id, dto.chain, 'BURN');
+  // ─── TRON mint/burn — same contract source as EVM, compiled for TVM, so the
+  // mint(address,uint256,string)/burn(address,uint256,string) interface is
+  // identical; only the calling mechanism (TronWeb vs ethers) differs. ───────
 
-    this.logger.log(`Burn submitted: ${tx.hash} for ${dto.amount} ${dto.token} from ${dto.fromAddress} on ${dto.chain}`);
-    return { txHash: tx.hash, status: 'PENDING' };
+  private async mintTronTokens(dto: MintDto): Promise<string> {
+    const tokenAddr = this.getTronTokenAddress(dto.token);
+    const minterKey = process.env.MINTER_TRON_PRIVATE_KEY;
+    if (!minterKey) throw new BadRequestException('MINTER_TRON_PRIVATE_KEY not set — cannot mint directly');
+
+    const tronWeb = new TronWeb({
+      fullHost: process.env.TRON_RPC!,
+      privateKey: minterKey,
+      headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+    });
+    const contract = await tronWeb.contract().at(tokenAddr);
+
+    const paused = await contract.paused().call();
+    if (paused) throw new BadRequestException(`${dto.token} is paused on tron`);
+
+    const amountMicro = BigInt(Math.round(parseFloat(dto.amount) * 1_000_000)).toString();
+    return contract.mint(dto.toAddress, amountMicro, dto.reason).send({ feeLimit: 150_000_000 });
+  }
+
+  private async burnTronTokens(dto: BurnDto): Promise<string> {
+    const tokenAddr = this.getTronTokenAddress(dto.token);
+    const burnerKey = process.env.BURNER_TRON_PRIVATE_KEY;
+    if (!burnerKey) throw new BadRequestException('BURNER_TRON_PRIVATE_KEY not set — cannot burn directly');
+
+    const tronWeb = new TronWeb({
+      fullHost: process.env.TRON_RPC!,
+      privateKey: burnerKey,
+      headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+    });
+    const contract = await tronWeb.contract().at(tokenAddr);
+
+    const amountMicro = BigInt(Math.round(parseFloat(dto.amount) * 1_000_000)).toString();
+    return contract.burn(dto.fromAddress, amountMicro, dto.reason).send({ feeLimit: 150_000_000 });
+  }
+
+  private getTronTokenAddress(token: string): string {
+    const map: Record<string, string | undefined> = {
+      INRX:  process.env.TRON_INRX_ADDRESS,
+      EGOLD: process.env.TRON_EGOLD_ADDRESS,
+      ESLVR: process.env.TRON_ESLVR_ADDRESS,
+    };
+    const addr = map[token];
+    if (!addr) throw new BadRequestException(`No TRON contract configured for ${token}`);
+    return addr;
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -535,103 +532,61 @@ export class StablecoinService implements OnModuleInit {
   private async recordTx(
     txHash: string, chain: string, type: string, amount: string,
     token: string, from: string, to: string, userId: string,
-    status: 'PENDING' | 'CONFIRMED' | 'FAILED' = 'CONFIRMED',
   ) {
-    
-    const realAddress   = type === 'MINT' ? to : from;
-    const matchAddress  = chain === 'tron' ? realAddress : realAddress.toLowerCase();
-
     const wallet = await this.prisma.wallet.findFirst({
-      where: { userId, chain, address: matchAddress },
+      where: { userId, chain },
     });
 
-    if (!wallet) {
-      this.logger.warn(
-        `recordTx: no wallet row found for user ${userId} address ${matchAddress} on ${chain} — ` +
-        `${type} succeeded on-chain but won't show up in that wallet's transaction history.`
-      );
-    }
+    // listener-service watches the chain directly and can insert its own
+    // Transaction row for this same (walletId, txHash) before we get here —
+    // usually tagged type 'RECEIVE'/'SEND' from the raw Transfer event, not
+    // the actual MINT/BURN. create().catch(P2002) used to "handle" that by
+    // skipping the duplicate insert, but Prisma logs the underlying error
+    // internally the moment the query fails — regardless of what the catch
+    // block then does with it — which is what was spamming "prisma:error
+    // ... Unique constraint failed" into the logs on every mint/burn even
+    // though nothing was actually wrong. upsert() sidesteps that: on
+    // conflict it just runs the update branch directly, no exception ever
+    // thrown, nothing to log, and it also corrects the row to the right
+    // type/addresses instead of leaving listener-service's guess in place.
+    const txData = {
+      chain, type: type as TxType, amount, tokenSymbol: token,
+      fromAddress: from, toAddress: to, status: 'CONFIRMED' as const,
+      confirmedAt: new Date(),
+    };
 
     await Promise.all([
-      // Only record Transaction if we found a real wallet
       wallet
-        ? this.prisma.transaction.create({
-            data: {
-              walletId:    wallet.id,
-              txHash,
-              chain,
-              type:        type as TxType,
-              amount,
-              tokenSymbol: token,
-              fromAddress: from,
-              toAddress:   to,
-              status,
-              confirmedAt: status === 'CONFIRMED' ? new Date() : null,
-            },
+        ? this.prisma.transaction.upsert({
+            where:  { walletId_txHash: { walletId: wallet.id, txHash } },
+            create: { walletId: wallet.id, txHash, ...txData },
+            update: txData,
           })
-        : Promise.resolve(), // no wallet found — skip DB record, mint/burn still worked
+        : Promise.resolve(),
 
-      // Always record audit log
       this.prisma.auditLog.create({
         data: {
           userId,
           action:     `${type}_TOKENS`,
           entityType: 'Token',
           entityId:   txHash,
-          payload:    { chain, token, amount, from, to, txHash, status },
+          payload:    { chain, token, amount, from, to, txHash },
         },
       }),
     ]);
-
-    return wallet;
   }
 
-  // Confirms a submitted mint/burn tx in the background, without blocking
-  // the HTTP response the caller (gateway) is waiting on. Updates the
-  // Transaction row we already created as PENDING to CONFIRMED (or FAILED)
-  // once the chain actually finalizes it. This is a fire-and-forget promise
-  // chain — errors here are only logged, never thrown, since the HTTP
-  // response for the mint/burn request has already been sent.
-  private confirmTxInBackground(
-    tx: ethers.TransactionResponse,
-    walletId: string | undefined,
-    chain: string,
-    type: string,
-  ) {
-    if (!walletId) return; // no DB row was created for this tx — nothing to update
-
-    tx.wait()
-      .then(async (receipt) => {
-        if (!receipt) return;
-        await this.prisma.transaction.updateMany({
-          where: { walletId, txHash: tx.hash },
-          data:  {
-            status:      receipt.status === 1 ? 'CONFIRMED' : 'REVERTED',
-            confirmedAt: new Date(),
-            blockNumber: BigInt(receipt.blockNumber),
-            gasUsed:     receipt.gasUsed != null ? receipt.gasUsed.toString() : undefined,
-          },
-        });
-        this.logger.log(`[${chain}] ${type} confirmed: ${tx.hash} (block ${receipt.blockNumber})`);
-      })
-      .catch(async (err: any) => {
-        await this.prisma.transaction.updateMany({
-          where: { walletId, txHash: tx.hash },
-          data:  { status: 'FAILED' },
-        }).catch(() => {});
-        this.logger.error(`[${chain}] ${type} failed to confirm: ${tx.hash} — ${err?.message ?? err}`);
-      });
-  }
-
-  // Same fix as listener.service.ts's getProvider(): this is a separate
-  // microservice with its own copy of this logic, so the earlier fix there
-  // never applied here. Without an explicit `staticNetwork`, ethers issues
-  // its own `eth_chainId` auto-detect call on every request; when the RPC
-  // endpoint is unreachable or rejects that call, ethers falls into its
-  // built-in "failed to detect network, retry in 1s" loop, which just spams
-  // logs forever instead of failing fast. Passing an explicit Network skips
-  // that detection entirely. Caching the provider (instead of constructing
-  // a new one on every call) also avoids doing that dance repeatedly.
+  // THE FIX: this used to construct a brand-new JsonRpcProvider on EVERY
+  // call with no network specified — ethers then tries to auto-detect the
+  // chain via its own eth_chainId call, and when the RPC endpoint is
+  // unreachable/misconfigured, it retries that detection indefinitely,
+  // producing the repeating "JsonRpcProvider failed to detect network and
+  // cannot start up; retry in 1s" spam. Passing the chain ID explicitly via
+  // staticNetwork skips detection entirely — a genuinely unreachable RPC
+  // now fails once, clearly, on the actual call that needed it, instead of
+  // hanging forever before ever getting there. Caching the instance (like
+  // listener-service already does) also means we're not reconnecting from
+  // scratch on every oracle-price push.
   private readonly EVM_CHAIN_IDS: Record<string, number> = {
     ethereum: 11155111,
     bsc:      97,
@@ -643,20 +598,22 @@ export class StablecoinService implements OnModuleInit {
   private getProvider(chain: string): ethers.JsonRpcProvider {
     if (this.evmProviders[chain]) return this.evmProviders[chain];
 
-    const map: Record<string, string | undefined> = {
-      ethereum: process.env.ETH_RPC,
-      bsc:      process.env.BSC_RPC,
-      polygon:  process.env.POLYGON_RPC,
+    const map: Record<string,string> = {
+      ethereum: process.env.ETH_RPC!,
+      bsc:      process.env.BSC_RPC!,
+      polygon:  process.env.POLYGON_RPC!,
     };
-    const url = map[chain];
-    if (!url) throw new BadRequestException(`Unsupported chain: ${chain}`);
+    if (!map[chain]) throw new BadRequestException(`Unsupported chain: ${chain}`);
 
     const chainId = this.EVM_CHAIN_IDS[chain];
     const provider = new ethers.JsonRpcProvider(
-      url,
+      map[chain],
       chainId ? ethers.Network.from(chainId) : undefined,
       {
         staticNetwork: chainId ? ethers.Network.from(chainId) : undefined,
+        // One JSON-RPC call per HTTP request — public/free-tier RPCs often
+        // rate-limit or reject batched arrays, which otherwise surfaces as
+        // a confusing "missing response for request" error.
         batchMaxCount: 1,
       },
     );

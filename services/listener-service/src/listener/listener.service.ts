@@ -250,10 +250,22 @@ export class ListenerService implements OnModuleInit {
         });
  
     if (!wallet) return;
- 
+
+    // swap-service/stablecoin-service can beat this poller to inserting a
+    // row for the same (walletId, txHash) — a burn/mint/swap leg IS a
+    // token Transfer on-chain, so this same handler sees it too. Unlike
+    // their upserts (which deliberately correct a generic RECEIVE/SEND
+    // guess into the more specific SWAP/MINT/BURN), this one must NOT
+    // clobber their type back to RECEIVE on conflict — it only exists here
+    // to confirm block info on whichever row already exists. create()
+    // with a catch on 'Unique constraint' used to "handle" the race, but
+    // Prisma logs the underlying P2002 internally the moment the insert
+    // fails regardless of the catch — upsert() avoids that entirely since
+    // no exception is thrown on conflict in the first place.
     try {
-      await this.prisma.transaction.create({
-        data: {
+      await this.prisma.transaction.upsert({
+        where: { walletId_txHash: { walletId: wallet.id, txHash: txHashNorm } },
+        create: {
           walletId:    wallet.id,
           txHash:      txHashNorm,
           chain,
@@ -266,12 +278,15 @@ export class ListenerService implements OnModuleInit {
           confirmedAt: new Date(),
           blockNumber: BigInt(blockNumber),
         },
+        update: {
+          status:      'CONFIRMED',
+          confirmedAt: new Date(),
+          blockNumber: BigInt(blockNumber),
+        },
       });
       this.logger.log(`[${chain}] Recorded RECEIVE ${symbol} ${txHashNorm} → wallet ${wallet.id}`);
     } catch (err: any) {
-      if (!err.message?.includes('Unique constraint')) {
-        this.logger.error(`Failed to record RECEIVE ${txHashNorm}: ${err.message}`);
-      }
+      this.logger.error(`Failed to record RECEIVE ${txHashNorm}: ${err.message}`);
     }
   }
 

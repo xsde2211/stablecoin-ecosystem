@@ -7,7 +7,7 @@ export type ServiceName =
   | 'auth' | 'wallet' | 'bridge' | 'stablecoin'
   | 'treasury' | 'reserve' | 'payment' | 'merchant'
   | 'kyc' | 'notification' | 'analytics' | 'fraud'
-  | 'listener' | 'admin';
+  | 'listener' | 'admin' | 'swap';
 
 // Routes that submit blockchain transactions and must wait for
 // the RPC broadcast — these need a longer timeout than regular DB calls.
@@ -41,6 +41,7 @@ export class ProxyService {
     fraud:        process.env.FRAUD_SERVICE_URL        ?? 'http://localhost:3013',
     listener:     process.env.LISTENER_SERVICE_URL     ?? 'http://localhost:3014',
     admin:        process.env.ADMIN_SERVICE_URL        ?? 'http://localhost:3015',
+    swap:         process.env.SWAP_SERVICE_URL         ?? 'http://localhost:3016',
   };
 
   constructor(private http: HttpService) {}

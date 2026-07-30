@@ -54,6 +54,7 @@ function resolveService(path: string): ServiceName | '' {
   if (path.startsWith('/fraud'))         return 'fraud';
   if (path.startsWith('/listener'))      return 'listener';
   if (path.startsWith('/admin'))         return 'admin';
+  if (path.startsWith('/swap'))          return 'swap';
   return '';
 }
 
