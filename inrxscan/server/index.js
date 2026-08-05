@@ -23,7 +23,7 @@ import path from 'path';
 dotenv.config({ path: './.env' });
 
 const app = express();
-app.use(cors());
+app.use(cors( { origin: process.env.ALLOWED_ORIGINS?.split(',') || '*' } ));
 app.use(express.json());
 
 const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3000';
