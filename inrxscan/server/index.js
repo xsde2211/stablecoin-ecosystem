@@ -19,12 +19,14 @@ import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import dotenv from 'dotenv';
+import path from 'path';
 dotenv.config({ path: './.env' });
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3001';
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3000';
 const PORT = process.env.PORT || 4000;
 
 const gateway = axios.create({ baseURL: GATEWAY_URL, timeout: 15_000 });
