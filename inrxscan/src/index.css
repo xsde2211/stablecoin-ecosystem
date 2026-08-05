@@ -1,0 +1,72 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  /* ── Ledger palette ─────────────────────────────────────────── */
+  --color-ink:        #0a0e14;   /* base background */
+  --color-ink-raised: #0f1420;   /* card / panel surface */
+  --color-ink-line:   #1c2433;   /* hairline dividers */
+  --color-ink-line-2: #262f42;   /* stronger borders / hover */
+  --color-paper:      #e9ecf3;   /* primary text on ink */
+  --color-paper-dim:  #8992a8;   /* secondary text */
+  --color-paper-faint:#5b6478;   /* tertiary / placeholder text */
+
+  --color-indigo:      #3654a6;  /* Rupee Indigo — primary brand/accent */
+  --color-indigo-soft: #445fb0;
+  --color-indigo-glow: #4d6cc7;
+
+  --color-gold:      #c9a227;    /* Bullion Gold — verified / live / signature */
+  --color-gold-dim:  #8a7020;
+
+  --color-mint:      #2fae6a;    /* success / receive / mint */
+  --color-mint-dim:  #1f7a4a;
+
+  --color-rust:      #c1523b;    /* burn / send / danger */
+  --color-rust-dim:  #8c3a29;
+
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-sans:    "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+html { color-scheme: dark; }
+
+body {
+  background: var(--color-ink);
+  color: var(--color-paper);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: var(--color-indigo); color: white; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--color-ink); }
+::-webkit-scrollbar-thumb { background: var(--color-ink-line-2); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-paper-faint); }
+
+/* the one signature animation: a gold scan-line that sweeps once
+   across the homepage stat strip on load. Used nowhere else. */
+@keyframes scan-sweep {
+  0%   { transform: translateX(-120%); opacity: 0; }
+  8%   { opacity: 1; }
+  55%  { opacity: 1; }
+  100% { transform: translateX(220%); opacity: 0; }
+}
+.scan-line { animation: scan-sweep 2.4s cubic-bezier(.25,.7,.4,1) 1; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .35; }
+}
+.pulse-dot { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+:focus-visible {
+  outline: 2px solid var(--color-gold);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-line, .pulse-dot { animation: none !important; }
+}
