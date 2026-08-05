@@ -2,27 +2,27 @@
 @import "tailwindcss";
 
 @theme {
-  /* ── Ledger palette ─────────────────────────────────────────── */
-  --color-ink:        #0a0e14;   /* base background */
-  --color-ink-raised: #0f1420;   /* card / panel surface */
-  --color-ink-line:   #1c2433;   /* hairline dividers */
-  --color-ink-line-2: #262f42;   /* stronger borders / hover */
-  --color-paper:      #e9ecf3;   /* primary text on ink */
-  --color-paper-dim:  #8992a8;   /* secondary text */
-  --color-paper-faint:#5b6478;   /* tertiary / placeholder text */
+  /* ── Ledger palette (brightened pass) ──────────────────────────── */
+  --color-ink:        #0d1220;   /* base background */
+  --color-ink-raised: #151c2c;   /* card / panel surface */
+  --color-ink-line:   #232c40;   /* hairline dividers */
+  --color-ink-line-2: #34405a;   /* stronger borders / hover */
+  --color-paper:      #f3f5fa;   /* primary text on ink */
+  --color-paper-dim:  #9aa3ba;   /* secondary text */
+  --color-paper-faint:#6b7590;   /* tertiary / placeholder text */
 
-  --color-indigo:      #3654a6;  /* Rupee Indigo — primary brand/accent */
-  --color-indigo-soft: #445fb0;
-  --color-indigo-glow: #4d6cc7;
+  --color-indigo:      #4361c9;  /* Rupee Indigo — primary brand/accent */
+  --color-indigo-soft: #5170d6;
+  --color-indigo-glow: #6c8aee;
 
-  --color-gold:      #c9a227;    /* Bullion Gold — verified / live / signature */
-  --color-gold-dim:  #8a7020;
+  --color-gold:      #dcb13a;    /* Bullion Gold — verified / live states */
+  --color-gold-dim:  #a3841f;
 
-  --color-mint:      #2fae6a;    /* success / receive / mint */
-  --color-mint-dim:  #1f7a4a;
+  --color-mint:      #38c07d;    /* success / receive / mint */
+  --color-mint-dim:  #22935c;
 
-  --color-rust:      #c1523b;    /* burn / send / danger */
-  --color-rust-dim:  #8c3a29;
+  --color-rust:      #d16a51;    /* burn / send / danger */
+  --color-rust-dim:  #a3492f;
 
   --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
   --font-sans:    "Inter", ui-sans-serif, system-ui, sans-serif;
@@ -40,26 +40,34 @@ body {
 
 ::selection { background: var(--color-indigo); color: white; }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar { width: 10px; height: 11px; }
 ::-webkit-scrollbar-track { background: var(--color-ink); }
 ::-webkit-scrollbar-thumb { background: var(--color-ink-line-2); border-radius: 6px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-paper-faint); }
-
-/* the one signature animation: a gold scan-line that sweeps once
-   across the homepage stat strip on load. Used nowhere else. */
-@keyframes scan-sweep {
-  0%   { transform: translateX(-120%); opacity: 0; }
-  8%   { opacity: 1; }
-  55%  { opacity: 1; }
-  100% { transform: translateX(220%); opacity: 0; }
-}
-.scan-line { animation: scan-sweep 2.4s cubic-bezier(.25,.7,.4,1) 1; }
 
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50%      { opacity: .35; }
 }
 .pulse-dot { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+/* Quiet elevation for cards that should feel interactive/liftable —
+   used sparingly, not on every card, so it still reads as an accent. */
+.card-lift {
+  transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.card-lift:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-ink-line-2);
+  box-shadow: 0 8px 24px -12px rgba(0,0,0,0.5);
+}
+
+/* Soft ambient glow used behind the hero search / brand marks — static,
+   not animated, so it never gets "stuck" mid-sweep the way the old
+   scan-line effect could. */
+.ambient-glow {
+  background: radial-gradient(60% 60% at 50% 0%, rgba(220,177,58,0.10), transparent 70%);
+}
 
 :focus-visible {
   outline: 2px solid var(--color-gold);
@@ -68,5 +76,5 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .scan-line, .pulse-dot { animation: none !important; }
+  .pulse-dot { animation: none !important; }
 }

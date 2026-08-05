@@ -26,7 +26,7 @@ const app = express();
 app.use(cors( { origin: process.env.ALLOWED_ORIGINS?.split(',') || '*' } ));
 app.use(express.json());
 
-const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3000';
+const GATEWAY_URL = process.env.GATEWAY_URL || 'http://localhost:3001';
 const PORT = process.env.PORT || 4000;
 
 const gateway = axios.create({ baseURL: GATEWAY_URL, timeout: 15_000 });

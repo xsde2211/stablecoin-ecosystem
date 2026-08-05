@@ -6,7 +6,7 @@ export default function StatTile({ label, value, sub, icon: Icon, accent = 'indi
   }[accent];
 
   return (
-    <div className="flex-1 min-w-[180px] border border-ink-line bg-ink-raised/60 rounded-lg px-5 py-4">
+    <div className="card-lift flex-1 min-w-[180px] border border-ink-line bg-ink-raised/70 rounded-lg px-5 py-4">
       <div className="flex items-center justify-between mb-2">
         <span className="text-[11px] uppercase tracking-wider text-paper-faint">{label}</span>
         {Icon && <Icon size={15} className={accentClass} />}

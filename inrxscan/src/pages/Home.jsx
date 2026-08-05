@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Coins, Activity, Users, IndianRupee } from 'lucide-react';
+import { Coins, Activity, Users, IndianRupee, ArrowUpRight } from 'lucide-react';
 import SearchBar from '../components/SearchBar';
 import StatTile from '../components/StatTile';
 import TxTable from '../components/TxTable';
@@ -21,8 +21,9 @@ export default function Home() {
   return (
     <div>
       {/* ── Hero ─────────────────────────────────────────── */}
-      <section className="border-b border-ink-line">
-        <div className="mx-auto max-w-7xl px-4 lg:px-8 py-14 text-center">
+      <section className="relative border-b border-ink-line overflow-hidden">
+        <div className="ambient-glow absolute inset-0 pointer-events-none" />
+        <div className="relative mx-auto max-w-7xl px-4 lg:px-8 py-16 text-center">
           <p className="font-mono text-xs tracking-widest text-gold uppercase mb-4">
             The public ledger for INRX
           </p>
@@ -39,43 +40,40 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ── Stat strip (signature scan-line moment) ─────────── */}
-      <section className="mx-auto max-w-7xl px-4 lg:px-8 -mt-1 relative">
+      {/* ── Stat strip ───────────────────────────────────── */}
+      <section className="mx-auto max-w-7xl px-4 lg:px-8 -mt-1">
         {statsError ? (
           <div className="py-6"><ErrorState message={statsError.message} /></div>
         ) : (
-          <div className="relative overflow-hidden rounded-lg">
-            <div className="scan-line pointer-events-none absolute inset-y-0 left-0 w-24 bg-gradient-to-r from-transparent via-gold/25 to-transparent z-10" />
-            <div className="flex flex-wrap gap-3 py-6">
-              <StatTile
-                label="Circulating Supply"
-                value={stats ? `₹${stats.circulatingSupply}` : '—'}
-                sub="INRX in circulation"
-                icon={IndianRupee}
-                accent="gold"
-              />
-              <StatTile
-                label="Networks"
-                value={stats ? stats.chains.length : '—'}
-                sub={stats ? stats.chains.join(' · ') : '—'}
-                icon={Coins}
-                accent="mint"
-              />
-              <StatTile
-                label="Transactions (24h)"
-                value={stats ? stats.tx24h.toLocaleString('en-IN') : '—'}
-                sub={stats ? `${stats.totalTxCount.toLocaleString('en-IN')} all-time` : '—'}
-                icon={Activity}
-                accent="indigo"
-              />
-              <StatTile
-                label="Active Wallets"
-                value={stats ? stats.activeWallets.toLocaleString('en-IN') : '—'}
-                sub="wallets with INRX activity"
-                icon={Users}
-                accent="indigo"
-              />
-            </div>
+          <div className="flex flex-wrap gap-3 py-6">
+            <StatTile
+              label="Circulating Supply"
+              value={stats ? `₹${stats.circulatingSupply}` : '—'}
+              sub="INRX in circulation"
+              icon={IndianRupee}
+              accent="gold"
+            />
+            <StatTile
+              label="Networks"
+              value={stats ? stats.chains.length : '—'}
+              sub={stats ? stats.chains.join(' · ') : '—'}
+              icon={Coins}
+              accent="mint"
+            />
+            <StatTile
+              label="Transactions (24h)"
+              value={stats ? stats.tx24h.toLocaleString('en-IN') : '—'}
+              sub={stats ? `${stats.totalTxCount.toLocaleString('en-IN')} all-time` : '—'}
+              icon={Activity}
+              accent="indigo"
+            />
+            <StatTile
+              label="Active Wallets"
+              value={stats ? stats.activeWallets.toLocaleString('en-IN') : '—'}
+              sub="wallets with INRX activity"
+              icon={Users}
+              accent="indigo"
+            />
           </div>
         )}
       </section>
@@ -89,7 +87,7 @@ export default function Home() {
           </div>
           <div className="flex flex-wrap gap-3">
             {stats.bridgeLockedByNetwork.map(b => (
-              <div key={b.chain} className="border border-ink-line bg-ink-raised/60 rounded-lg px-5 py-4 min-w-[180px]">
+              <div key={b.chain} className="card-lift border border-ink-line bg-ink-raised/70 rounded-lg px-5 py-4 min-w-[180px]">
                 <div className="text-[11px] uppercase tracking-wider text-paper-faint mb-1">{b.chainLabel}</div>
                 <div className="font-display text-lg font-semibold text-paper">{Number(b.balance).toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}</div>
                 <div className="text-[10px] text-paper-faint font-mono mt-1 truncate" title={b.address}>{b.address}</div>
@@ -103,9 +101,11 @@ export default function Home() {
       <section className="mx-auto max-w-7xl px-4 lg:px-8 py-12">
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-display text-lg font-semibold text-paper">Latest Transactions</h2>
-          <Link to="/txs" className="text-xs text-indigo-glow hover:underline font-mono">view all →</Link>
+          <Link to="/txs" className="inline-flex items-center gap-1 text-xs text-indigo-glow hover:underline font-mono">
+            view all <ArrowUpRight size={13} />
+          </Link>
         </div>
-        <div className="border border-ink-line rounded-lg bg-ink-raised/40 px-4">
+        <div className="border border-ink-line rounded-lg bg-ink-raised/50 px-4">
           {txError ? <ErrorState message={txError.message} /> : <TxTable rows={txs} loading={txs === null} />}
         </div>
       </section>
