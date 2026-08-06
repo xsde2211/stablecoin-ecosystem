@@ -7,30 +7,37 @@ import SearchBar from './SearchBar';
 
 function Logo() {
   return (
-    <Link to="/" className="flex items-center gap-2 shrink-0 group">
-      <span className="flex h-8 w-8 items-center justify-center rounded border border-gold/40 bg-gold/10 font-mono text-gold text-sm font-semibold group-hover:bg-gold/15 transition-colors">
+    <Link to="/" className="flex items-center gap-2.5 shrink-0 group">
+      <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-gold/40 bg-gradient-to-br from-gold/20 to-gold/5 font-mono text-gold text-sm font-semibold shadow-[0_0_0_1px_rgba(220,177,58,0.08)] group-hover:from-gold/30 transition-colors">
         ₹
       </span>
       <span className="font-display text-lg font-semibold tracking-tight text-paper">
         INRX<span className="text-gold">Scan</span>
+      </span>
+      <span className="hidden sm:inline-flex items-center rounded-full border border-ink-line-2 px-2 py-0.5 text-[10px] font-mono text-paper-faint tracking-wide">
+        TESTNET
       </span>
     </Link>
   );
 }
 
 const navLink = ({ isActive }) =>
-  `text-sm font-medium transition-colors ${isActive ? 'text-paper' : 'text-paper-dim hover:text-paper'}`;
+  `relative text-sm font-medium transition-colors py-1 ${
+    isActive
+      ? 'text-paper after:absolute after:-bottom-[13px] after:left-0 after:right-0 after:h-[2px] after:bg-gold after:rounded-full'
+      : 'text-paper-dim hover:text-paper'
+  }`;
 
 export default function Navbar() {
   const { address, connect, connecting, disconnect } = useWallet();
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
-    <header className="sticky top-0 z-40 border-b border-ink-line bg-ink/90 backdrop-blur">
+    <header className="sticky top-0 z-40 border-b border-ink-line bg-ink/85 backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3 lg:px-8">
         <Logo />
 
-        <nav className="hidden lg:flex items-center gap-5 shrink-0">
+        <nav className="hidden lg:flex items-center gap-6 shrink-0">
           <NavLink to="/" end className={navLink}>Home</NavLink>
           <NavLink to="/txs" className={navLink}>Transactions</NavLink>
         </nav>
@@ -46,14 +53,14 @@ export default function Navbar() {
               className="hidden sm:flex items-center gap-2 rounded-md border border-mint/30 bg-mint/10 px-3 py-1.5 text-xs font-mono text-mint hover:bg-mint/15 transition-colors"
               title="Click to disconnect"
             >
-              <span className="h-1.5 w-1.5 rounded-full bg-mint" />
+              <span className="h-1.5 w-1.5 rounded-full bg-mint pulse-dot" />
               {truncateHash(address, 6, 4)}
             </button>
           ) : (
             <button
               onClick={connect}
               disabled={connecting}
-              className="hidden sm:flex items-center gap-2 rounded-md bg-indigo hover:bg-indigo-soft transition-colors px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+              className="hidden sm:flex items-center gap-2 rounded-md bg-indigo hover:bg-indigo-soft transition-colors px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 shadow-[0_0_0_1px_rgba(67,97,201,0.3)]"
             >
               <Wallet size={14} />
               {connecting ? 'Connecting…' : 'Connect Wallet'}
