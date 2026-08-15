@@ -32,9 +32,10 @@ contract EGold is
     // Gold price feed (updated by oracle)
     uint256 public goldPricePerGram; // in INR, 6 decimals
     address public priceOracle;
+
     uint256 public totalMinted;
     uint256 public totalBurned;
-    
+
     event Mint(address indexed to, uint256 grams, uint256 priceAtMint, string indexed reason);
     event Burn(address indexed from, uint256 grams, string indexed reason);
     event GoldPriceUpdated(uint256 newPrice);

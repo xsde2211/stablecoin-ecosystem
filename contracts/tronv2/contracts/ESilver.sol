@@ -8,10 +8,10 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 /**
- * @title eGold — Gold-backed token
- * @notice 1 EGOLD = 1 gram of gold
+ * @title eSilver — Silver-backed token
+ * @notice 1 ESLVR = 1 gram of silver
  */
-contract EGold is
+contract ESilver is
     Initializable,
     ERC20Upgradeable,
     ERC20PausableUpgradeable,
@@ -20,24 +20,22 @@ contract EGold is
 {
     bytes32 public constant MINTER_ROLE   = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE   = keccak256("BURNER_ROLE");
-    bytes32 public constant FREEZER_ROLE  = keccak256("FREEZER_ROLE");
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    bytes32 public constant FREEZER_ROLE     = keccak256("FREEZER_ROLE");
     bytes32 public constant BLACKLISTER_ROLE = keccak256("BLACKLISTER_ROLE");
     bytes32 public constant TREASURY_ROLE    = keccak256("TREASURY_ROLE");
 
-    mapping(address => bool) private _blacklisted;
     mapping(address => bool) private _frozen;
-    uint256 public mintCap;
-    
-    // Gold price feed (updated by oracle)
-    uint256 public goldPricePerGram; // in INR, 6 decimals
+    mapping(address => bool) private _blacklisted;
+
+    uint256 public silverPricePerGram; // in INR, 6 decimals
     address public priceOracle;
+    uint256 public mintCap;
     uint256 public totalMinted;
     uint256 public totalBurned;
-    
+
     event Mint(address indexed to, uint256 grams, uint256 priceAtMint, string indexed reason);
     event Burn(address indexed from, uint256 grams, string indexed reason);
-    event GoldPriceUpdated(uint256 newPrice);
     event Blacklisted(address indexed account, bool status);
     event AddressFrozen(address indexed account, bool status);
     event MintCapUpdated(uint256 newCap);
@@ -50,9 +48,9 @@ contract EGold is
         address minter,
         address treasury,
         uint256 _mintCap,
-        uint256 initialGoldPrice
+        uint256 initialSilverPrice
     ) public initializer {
-        __ERC20_init("eGold Token", "EGOLD");
+        __ERC20_init("eSilver Token", "ESLVR");
         __ERC20Pausable_init();
         __AccessControl_init();
         __UUPSUpgradeable_init();
@@ -61,18 +59,18 @@ contract EGold is
         _grantRole(MINTER_ROLE, minter);
         _grantRole(TREASURY_ROLE, treasury);
         _grantRole(UPGRADER_ROLE, admin);
+        mintCap = _mintCap;
 
-        mintCap          = _mintCap;
-        goldPricePerGram = initialGoldPrice;
+        silverPricePerGram = initialSilverPrice;
         priceOracle = admin;
     }
 
     function mint(address to, uint256 grams,string calldata reason) external onlyRole(MINTER_ROLE) {
-        require(!_blacklisted[to], "EGold: blacklisted");
-        require(totalSupply() + grams <= mintCap, "EGold: mint cap exceeded");
+        require(!_blacklisted[to], "ESilver: blacklisted");
+        require(totalSupply() + grams <= mintCap, "ESilver: mint cap exceeded");
         totalMinted += grams; 
         _mint(to, grams);
-        emit Mint(to, grams, goldPricePerGram, reason);
+        emit Mint(to, grams, silverPricePerGram, reason);
     }
 
     function burn(address from, uint256 grams,string calldata reason) external onlyRole(BURNER_ROLE) {
@@ -80,21 +78,24 @@ contract EGold is
         _burn(from, grams);
         emit Burn(from, grams,reason);
     }
-
-    function updateGoldPrice(uint256 newPrice) external {
-        require(msg.sender == priceOracle, "EGold: not oracle");
-        goldPricePerGram = newPrice;
-        emit GoldPriceUpdated(newPrice);
+    function updateSilverPrice(uint256 newPrice) external {
+        require(msg.sender == priceOracle, "ESilver: not oracle");
+        silverPricePerGram = newPrice;
     }
 
-    function blacklist(address account, bool status) external onlyRole(BLACKLISTER_ROLE){
+    function blacklist(address account, bool status)external onlyRole(BLACKLISTER_ROLE){
         _blacklisted[account] = status;
         emit Blacklisted(account, status);
     }
 
-    function freeze(address account, bool status)external onlyRole(FREEZER_ROLE){
+    function freeze(address account, bool status) external onlyRole(FREEZER_ROLE){
         _frozen[account] = status;
         emit AddressFrozen(account, status);
+    }
+
+    function setMintCap(uint256 newCap) external onlyRole(TREASURY_ROLE){
+        mintCap = newCap;
+        emit MintCapUpdated(newCap);
     }
 
     function isBlacklisted(address a) external view returns (bool){
@@ -105,25 +106,19 @@ contract EGold is
         return _frozen[a];
     }
 
-    function setMintCap(uint256 newCap) external onlyRole(TREASURY_ROLE){
-        mintCap = newCap;
-        emit MintCapUpdated(newCap);
-    }
-        
     function pause()   external onlyRole(DEFAULT_ADMIN_ROLE) { _pause(); }
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) { _unpause(); }
 
     function _beforeTokenTransfer(address from,address to,uint256 amount) internal
     override(ERC20Upgradeable, ERC20PausableUpgradeable){
         if (from != address(0)) {
-            require(!_blacklisted[from] && !_frozen[from], "EGold: restricted");
-            require(!_frozen[from], "EGold: sender frozen");
+            require(!_blacklisted[from], "ESilver: restricted");
+            require(!_frozen[from], "ESilver: sender frozen");
         }
 
         if (to != address(0)) {
-            require(!_blacklisted[to], "EGold: restricted");
+            require(!_blacklisted[to], "ESilver: restricted");
         }
-
         super._beforeTokenTransfer(from, to, amount);
     }
 

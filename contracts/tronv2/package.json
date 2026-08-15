@@ -1,5 +1,5 @@
 {
-  "name": "@ecosystem/contracts-v1-tron",
+  "name": "@ecosystem/contracts-tron",
   "version": "2.0.0",
   "description": "TRON contracts — TronBridge + token compilation via TronBox",
   "scripts": {
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "dotenv": "^16.0.0",
+    "ethers": "^6.11.0",
     "tronweb": "^6.0.0"
   },
   "devDependencies": {
