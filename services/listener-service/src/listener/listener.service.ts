@@ -31,30 +31,33 @@ const CHAIN_ID_TO_NAME: Record<string,string> = {
   '11155111':  'ethereum',
   '97':        'bsc',
   '80002':     'polygon',
-  '728126428': 'tron',
+  '3448148188': 'tron',
 };
+
+
 
 @Injectable()
 export class ListenerService implements OnModuleInit {
   private readonly logger = new Logger(ListenerService.name);
 
   // Track last processed block per chain to avoid re-scanning
-  private lastBlocks: Record<string, number> = {};
+  private lastBlocks: Record<string, number> = {}; //eg { ethereum_tokens: 12345678, bsc_tokens: 9876543 } So next polling starts from block 12346 instead of block 0, Without it, every poll would scan the blockchain from the beginning.
+  private lastTronEventTs: Record<string, number> = {}; //store timestamp of last processed tron event eg { INRX: 1690000000000, EGOLD: 1690000000000 } So next polling starts from timestamp 1690000000000 instead of timestamp 0, Without it, every poll would scan the blockchain from the beginning.
 
+  // create prisma and redis service instances and now can access them using this.prisma and this.redis
   constructor(
     private prisma: PrismaService,
-    private redis:  RedisService,
+    private redis:  RedisService
   ) {}
 
+  //called once when application starts
   async onModuleInit() {
     this.logger.log('Listener service initializing — setting up WebSocket subscriptions');
 
     // Set up real-time WebSocket listeners for EVM chains (where WSS available)
     await this.setupEVMWebsocketListeners();
-
     // Watch plain token Transfer events (wallet sends/receives) on chains with WSS
     await this.setupTokenTransferListeners();
-
     // Initialize last-block tracking for polling-based chains (TRON, fallback EVM)
     await this.initLastBlocks();
 
@@ -62,7 +65,9 @@ export class ListenerService implements OnModuleInit {
   }
 
   // ─── WebSocket listeners (real-time, for chains with WSS RPC) ────────────────
-
+  // eth,polygon uses WebSocketProvider to listen for events in real-time, instead of polling every 60s. This is faster and more efficient, but requires a WSS RPC endpoint. If the WSS connection drops, it will automatically reconnect and re-subscribe to events. 
+  // tron and bsc uses polling
+  // below function is for eth,polygon using websocket
   private async setupEVMWebsocketListeners() {
     const wsConfigs = [
       { chain:'ethereum', wsUrl: process.env.ETH_WS_RPC,     bridgeAddr: process.env.ETH_BRIDGE_V2_ADDRESS },
@@ -81,11 +86,19 @@ export class ListenerService implements OnModuleInit {
   // Sets up (or re-sets-up, after a dropped connection) the bridge-events WS
   // listener for one chain. Split out from setupEVMWebsocketListeners so the
   // reconnect handler below can call it again on its own.
+  private readonly EVM_CHAIN_IDS: Record<string, number> = {
+    ethereum: 11155111,
+    bsc:      97,
+    polygon:  80002,
+  };
+
+  // Our listener service maintains a WebSocket connection to an Ethereum/Polygon node, 
+  // and that node streams our bridge contract's events to the service in real time
   private connectBridgeWs(chain: string, wsUrl: string, bridgeAddr: string) {
     try {
       const provider = new ethers.WebSocketProvider(
-        wsUrl,
-        this.EVM_CHAIN_IDS[chain] ? ethers.Network.from(this.EVM_CHAIN_IDS[chain]) : undefined,
+        wsUrl, //websocket endpoint for that blockchain node
+        this.EVM_CHAIN_IDS[chain] ? ethers.Network.from(this.EVM_CHAIN_IDS[chain]) : undefined, //specify which network this provider connected to
       );
       this.attachWsResilience(chain, 'bridge', provider, () => this.connectBridgeWs(chain, wsUrl, bridgeAddr));
 
@@ -103,6 +116,221 @@ export class ListenerService implements OnModuleInit {
     }
   }
 
+  //store ws reconnect attempts for each chain , eg: { 'ethereum:bridge': 3, 'polygon:bridge': 1 } means ethereum bridge ws has reconnected 3 times and polygon bridge ws has reconnected 1 time
+  private wsReconnectAttempts: Record<string, number> = {};
+
+  //difference in attachWsResilience and scheduleWsReconnect is that attachwsresilience watched websocket for failures and schedulewsreconnect manages reconnect after failure detect
+  //agar websocket connection drop ho jaye to ye function websocket ko reconnect karne ke liye use hota hai, aur agar 10 attempts ke baad bhi reconnect nahi hota to polling method pe rely karega
+  private attachWsResilience(
+    chain: string,
+    label: string,
+    provider: ethers.WebSocketProvider,
+    reconnect: () => void,
+  ) {
+    const socket: any = (provider as any).websocket;
+    if (!socket || typeof socket.on !== 'function') return;
+
+    socket.on('error', (err: any) => {
+      this.logger.warn(`[${chain}] ${label} WebSocket error (will retry): ${err?.message ?? err}`);
+    });
+    socket.on('close', () => {
+      this.logger.warn(`[${chain}] ${label} WebSocket closed — scheduling reconnect`);
+      this.scheduleWsReconnect(chain, label, reconnect);
+    });
+    socket.once('open', () => {
+      this.wsReconnectAttempts[`${chain}:${label}`] = 0;
+    });
+  }
+
+  // Schedule a reconnect attempt with exponential backoff, capped at 30s. After 10 failed attempts, give up and rely on polling only.
+  private scheduleWsReconnect(chain: string, label: string, reconnect: () => void) {
+    const key = `${chain}:${label}`;
+    const attempt = (this.wsReconnectAttempts[key] ?? 0) + 1;
+    this.wsReconnectAttempts[key] = attempt;
+
+    if (attempt > 10) {
+      this.logger.error(
+        `[${chain}] ${label}: giving up on WebSocket reconnects after ${attempt} attempts — ` +
+        `relying on HTTPS polling only for this chain until the app restarts.`,
+      );
+      return;
+    }
+
+    //attempt 1: 2^1 * 1000 = wait for 2000ms, attempt 2: 2^2 * 1000 = 4000ms, attempt 3: 2^3 * 1000 = 8000ms, attempt 4: 2^4 * 1000 = 16000ms, attempt 5: 2^5 * 1000 = 32000ms (capped at 30000ms)
+    const delay = Math.min(30000, 1000 * 2 ** attempt); 
+    this.logger.debug(`[${chain}] ${label}: reconnecting WebSocket in ${delay}ms (attempt ${attempt}/10)`);
+    setTimeout(reconnect, delay); 
+  }
+
+  // here these 4 function update status of bridge transfer(pending,locked,completed) in the database
+  // and then they publish the event to redis so that bridge service can listen to it and proceed with the next step of the transfer
+  // these function are called when transfer happened on contract and we want to update database and notify bridge service to proceed with next step of transfer
+  private async handleLockEvent(chain: string, args: any[]) {
+    const [tokenId, from, amount, dstChainId, dstRecipient, nonce, deadline, event] = args;
+    const symbol   = TOKEN_IDS_TO_SYMBOL[tokenId] ?? 'UNKNOWN';
+    const dstChain = CHAIN_ID_TO_NAME[dstChainId.toString()] ?? 'unknown';
+
+    this.logger.log(`[${chain}] TokensLocked: ${symbol} ${ethers.formatUnits(amount,6)} from ${from} → ${dstChain}/${dstRecipient} (nonce=${nonce})`);
+
+    // Find matching pending BridgeTransfer by nonce + srcChain
+    const transfer = await this.prisma.bridgeTransfer.findFirst({
+      where: { srcChain:chain, nonce:nonce.toString(), status:{ in:['PENDING','LOCKED'] } },
+    });
+
+    if (transfer) {
+      //status: pending -> locked
+      await this.prisma.bridgeTransfer.update({
+        where: { id: transfer.id },
+        data:  { status:'LOCKED', srcTxHash: event?.log?.transactionHash ?? event?.transactionHash },
+      });
+      this.logger.log(`Bridge transfer ${transfer.id} confirmed LOCKED on ${chain}`);
+
+      // Notify bridge-service to proceed with relayer mint via Redis pub/sub, bridge service receive this using redis.subscribe('bridge:locked')
+      await this.redis.publish('bridge:locked', JSON.stringify({
+        transferId: transfer.id, chain, symbol, amount: ethers.formatUnits(amount,6),
+      }));
+    }
+  }
+
+  private async handleMintEvent(chain: string, args: any[]) {
+    const [tokenId, to, amount, srcChainId, nonceKey, event] = args;
+    const symbol = TOKEN_IDS_TO_SYMBOL[tokenId] ?? 'UNKNOWN';
+
+    this.logger.log(`[${chain}] TokensMinted: ${symbol} ${ethers.formatUnits(amount,6)} → ${to} (nonceKey=${nonceKey})`);
+
+    const transfer = await this.prisma.bridgeTransfer.findFirst({
+      where: { dstChain:chain, status:'LOCKED', dstAddress:to },
+      orderBy: { createdAt:'desc' },
+    });
+
+    if (transfer) {
+      //status: locked -> completed
+      await this.prisma.bridgeTransfer.update({
+        where: { id: transfer.id },
+        data:  { status:'COMPLETED', dstTxHash: event?.log?.transactionHash ?? event?.transactionHash },
+      });
+      this.logger.log(`Bridge transfer ${transfer.id} COMPLETED on ${chain}`);
+
+      await this.redis.publish('bridge:completed', JSON.stringify({
+        transferId: transfer.id, chain, symbol, amount: ethers.formatUnits(amount,6),
+      }));
+    }
+  }
+
+  //Pending to locked 
+  private async handleBurnEvent(chain: string, args: any[]) {
+    const [tokenId, from, amount, srcChainId, srcRecipient, nonce, deadline, event] = args;
+    const symbol    = TOKEN_IDS_TO_SYMBOL[tokenId] ?? 'UNKNOWN';
+    const srcChain  = CHAIN_ID_TO_NAME[srcChainId.toString()] ?? 'unknown';
+
+    this.logger.log(`[${chain}] TokensBurned: ${symbol} ${ethers.formatUnits(amount,6)} from ${from} → unlock on ${srcChain}/${srcRecipient}`);
+
+    const transfer = await this.prisma.bridgeTransfer.findFirst({
+      where: { dstChain:chain, srcChain, nonce:nonce.toString(), status:{ in:['PENDING','LOCKED'] }, type:'BURN_UNLOCK' },
+    });
+
+    if (transfer) {
+      await this.prisma.bridgeTransfer.update({
+        where: { id: transfer.id },
+        data:  { status:'LOCKED', srcTxHash: event?.log?.transactionHash ?? event?.transactionHash }, //here status locked doesnt mean that tokens are locked on the source chain, it means that the burn transaction is confirmed on the destination chain and now the relayer can proceed to unlock the tokens on the source chain
+      });
+      await this.redis.publish('bridge:burned', JSON.stringify({
+        transferId: transfer.id, chain, symbol, amount: ethers.formatUnits(amount,6),
+      }));
+    }
+  }
+
+  //locked to completed
+  private async handleUnlockEvent(chain: string, args: any[]) {
+    const [tokenId, to, amount, dstChainId, nonceKey, event] = args;
+    const symbol = TOKEN_IDS_TO_SYMBOL[tokenId] ?? 'UNKNOWN';
+
+    this.logger.log(`[${chain}] TokensUnlocked: ${symbol} ${ethers.formatUnits(amount,6)} → ${to}`);
+
+    const transfer = await this.prisma.bridgeTransfer.findFirst({
+      where: { srcChain:chain, status:'LOCKED', srcAddress:to, type:'BURN_UNLOCK' },
+      orderBy: { createdAt:'desc' },
+    });
+
+    if (transfer) {
+      await this.prisma.bridgeTransfer.update({
+        where: { id: transfer.id },
+        data:  { status:'COMPLETED', dstTxHash: event?.log?.transactionHash ?? event?.transactionHash },
+      });
+      await this.redis.publish('bridge:completed', JSON.stringify({
+        transferId: transfer.id, chain, symbol, amount: ethers.formatUnits(amount,6),
+      }));
+    }
+  }
+/*
+Example:                                        
+our Listener
+      │
+      │ "Subscribe to TokensLocked
+      │  on contract 0x1234..."
+      ▼
+Ethereum Node
+      │
+      │ Watches every new block
+      ▼
+Blockchain
+      │
+      ├── Contract A emits Transfer
+      ├── Contract B emits Approval
+      ├── Your Bridge emits TokensLocked ✅
+      └── Contract C emits Mint
+      │
+      ▼
+Node checks filter
+      │
+      ├── Transfer ❌ Ignore
+      ├── Approval ❌ Ignore
+      ├── TokensLocked ✅ Send to your listener
+      └── Mint ❌ Ignore
+
+So your service only receives events that match the filter.
+
+HOW ABOVE FUNCTION WORKS IN ORDER:
+1. connectBridgeWs()
+        │
+        ▼
+2. Create WebSocketProvider
+        │
+        ▼
+3. attachWsResilience()
+        │
+        ▼
+4. WebSocket running...
+        │
+        ▼
+5. Internet disconnects
+        │
+        ▼
+6. socket emits "close"
+        │
+        ▼
+7. attachWsResilience detects it
+        │
+        ▼
+8. Calls scheduleWsReconnect()
+        │
+        ▼
+9. Wait 2 seconds
+        │
+        ▼
+10. Calls reconnect()
+        │
+        ▼
+11. connectBridgeWs()
+        │
+        ▼
+12. New WebSocketProvider created
+        │
+        ▼
+13. attachWsResilience() attaches listeners again
+*/
+
+//---------------------------------------------------------------------------------------------------------
   // ─── WebSocket listeners for plain token Transfer events (wallet send/receive) ─
 
   private async setupTokenTransferListeners() {
@@ -154,63 +382,6 @@ export class ListenerService implements OnModuleInit {
     }
   }
 
-  // ─── WebSocket resilience ──────────────────────────────────────────────────
-  //
-  // ethers' WebSocketProvider wraps a raw `ws` socket under the hood. If that
-  // socket fails during the initial connection (bad DNS, connection refused,
-  // etc.) it emits its own 'error' event — and if nothing is listening for
-  // 'error' on that raw socket at that moment, Node treats it as an
-  // UNHANDLED exception and kills the entire process. That's exactly what
-  // happened here: a one-off DNS hiccup for sepolia.infura.io took down the
-  // whole listener service, not just the ETH WS connection.
-  //
-  // `provider.websocket` exposes that raw socket. We grab it immediately
-  // after construction (synchronously, before any async DNS/network failure
-  // can fire) and attach our own 'error'/'close' handlers so a transient
-  // network blip is logged and retried instead of crashing the process.
-  // Realtime WS listening is a bonus on top of the HTTPS polling fallback
-  // above anyway, so it's safe to just log, back off, and retry.
-
-  private wsReconnectAttempts: Record<string, number> = {};
-
-  private attachWsResilience(
-    chain: string,
-    label: string,
-    provider: ethers.WebSocketProvider,
-    reconnect: () => void,
-  ) {
-    const socket: any = (provider as any).websocket;
-    if (!socket || typeof socket.on !== 'function') return;
-
-    socket.on('error', (err: any) => {
-      this.logger.warn(`[${chain}] ${label} WebSocket error (will retry): ${err?.message ?? err}`);
-    });
-    socket.on('close', () => {
-      this.logger.warn(`[${chain}] ${label} WebSocket closed — scheduling reconnect`);
-      this.scheduleWsReconnect(chain, label, reconnect);
-    });
-    socket.once('open', () => {
-      this.wsReconnectAttempts[`${chain}:${label}`] = 0;
-    });
-  }
-
-  private scheduleWsReconnect(chain: string, label: string, reconnect: () => void) {
-    const key = `${chain}:${label}`;
-    const attempt = (this.wsReconnectAttempts[key] ?? 0) + 1;
-    this.wsReconnectAttempts[key] = attempt;
-
-    if (attempt > 10) {
-      this.logger.error(
-        `[${chain}] ${label}: giving up on WebSocket reconnects after ${attempt} attempts — ` +
-        `relying on HTTPS polling only for this chain until the app restarts.`,
-      );
-      return;
-    }
-
-    const delay = Math.min(30000, 1000 * 2 ** attempt); // capped exponential backoff
-    this.logger.debug(`[${chain}] ${label}: reconnecting WebSocket in ${delay}ms (attempt ${attempt}/10)`);
-    setTimeout(reconnect, delay);
-  }
 
 // ─── Shared handler — confirms sends, records receives, for any chain/token ───
 
@@ -249,7 +420,26 @@ export class ListenerService implements OnModuleInit {
           where: { address: { equals: toNorm, mode: 'insensitive' }, chain },
         });
  
-    if (!wallet) return;
+    if (!wallet) {
+      this.logger.log(
+        `[${chain}] No wallet found for RECEIVE candidate ${toNorm} (${symbol} ${txHashNorm}) — not one of our users, or an address-normalization mismatch`
+      );
+      return;
+    };
+
+    const isBridgeLeg = await this.prisma.bridgeTransfer.findFirst({
+      where: {
+        OR: [
+          { srcTxHash: { equals: txHashNorm, mode: 'insensitive' } },
+          { dstTxHash: { equals: txHashNorm, mode: 'insensitive' } },
+        ],
+      },
+      select: { id: true },
+    });
+    if (isBridgeLeg) {
+      this.logger.log(`[${chain}] Skipping RECEIVE for ${txHashNorm} — already represented as a bridge transfer leg`);
+      return;
+    }
 
     // swap-service/stablecoin-service can beat this poller to inserting a
     // row for the same (walletId, txHash) — a burn/mint/swap leg IS a
@@ -529,121 +719,78 @@ export class ListenerService implements OnModuleInit {
       const tokenAddr = this.getTokenAddress('tron', symbol);
       if (!tokenAddr) continue;
 
+      // Anchored to the last event actually processed for this token, not
+      // wall-clock time or a fixed page size. TronGrid's events endpoint
+      // defaults to order_by=block_timestamp,desc with limit=20 — with
+      // only_confirmed=true, an event needs time to solidify before it
+      // even appears, and if 20+ *other* transfers land on the same
+      // contract in that window (easy on a heavily-tested token), the
+      // still-unconfirmed one falls out of "most recent 20" and is never
+      // seen again. Walking forward from the last processed event
+      // (order_by=asc + min_timestamp) instead means a slow-to-confirm
+      // event just shows up on a later poll — nothing can silently drop.
+      const tokenAddrBase58 = this.normalizeTronAddress(tokenAddr);
+
+      if (this.lastTronEventTs[symbol] === undefined) {
+        this.lastTronEventTs[symbol] = Date.now() - 10 * 60 * 1000;
+      }
+
       try {
-        const url = `${process.env.TRON_RPC}/v1/contracts/${tokenAddr}/events?event_name=Transfer&only_confirmed=true&limit=20`;
+        const url = `${process.env.TRON_RPC}/v1/contracts/${tokenAddrBase58}/events`;
         const res = await axios.get(url, {
+          params: {
+            event_name:         'Transfer',
+            only_confirmed:     true,
+            min_block_timestamp: this.lastTronEventTs[symbol], // was min_timestamp — not a
+                                                                 // real TronGrid param, so it
+                                                                 // was silently ignored every
+                                                                 // single poll, which is why
+                                                                 // the same tx kept reappearing
+            order_by:            'block_timestamp,asc',
+            limit:                200,
+          },
           headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
           timeout: 10000,
         });
 
         for (const evt of res.data?.data ?? []) {
-          const from  = this.normalizeTronAddress(evt.result?.from);
-          const to    = this.normalizeTronAddress(evt.result?.to);
-          const value = BigInt(evt.result?.value ?? '0');
-          this.logger.debug(`[tron] ${symbol} Transfer ${evt.transaction_id}: ${from} → ${to} (${value})`);
+          // Defensive: TronGrid names event params after whatever the
+          // verified ABI declares. Our OZ-based ERC20 uses Transfer(from,
+          // to, value) — but if ABI resolution ever falls back to a
+          // generic TRC20 template, the community-standard interface
+          // names them _from/_to/_value (underscore-prefixed) instead.
+          // Handling both (plus positional array as a last resort) means
+          // this doesn't silently break again if that fallback ever
+          // kicks in — which is exactly what happened here (result.from/
+          // .to/.value were all empty, meaning neither key was present as
+          // the code assumed).
+          const r = evt.result ?? {};
+          const rawFrom  = r.from  ?? r._from  ?? (Array.isArray(r) ? r[0] : undefined);
+          const rawTo    = r.to    ?? r._to    ?? (Array.isArray(r) ? r[1] : undefined);
+          const rawValue = r.value ?? r._value ?? (Array.isArray(r) ? r[2] : undefined);
+
+          if (!rawFrom || !rawTo) {
+            this.logger.warn(`[tron] ${symbol} Transfer ${evt.transaction_id}: could not extract from/to — raw result: ${JSON.stringify(evt.result)}`);
+            continue;
+          }
+
+          const from  = this.normalizeTronAddress(rawFrom);
+          const to    = this.normalizeTronAddress(rawTo);
+          const value = BigInt(rawValue ?? '0');
+          this.logger.log(`[tron] ${symbol} Transfer ${evt.transaction_id}: ${from} → ${to} (${value})`);
           await this.handleTokenTransfer('tron', symbol, from, to, value, evt.transaction_id, evt.block ?? 0);
+
+          if (evt.block_timestamp && evt.block_timestamp >= this.lastTronEventTs[symbol]) {
+            this.lastTronEventTs[symbol] = evt.block_timestamp + 1;
+          }
         }
       } catch (err: any) {
-        // Non-fatal — TronGrid event API may rate limit
+        this.logger.warn(`[tron] ${symbol} poll failed: ${err.response?.status ?? ''} ${err.response?.data ? JSON.stringify(err.response.data).slice(0, 300) : err.message}`);
       }
     }
   }
 
-  // ─── Event Handlers — Bridge events ───────────────────────────────────────────
 
-  private async handleLockEvent(chain: string, args: any[]) {
-    const [tokenId, from, amount, dstChainId, dstRecipient, nonce, deadline, event] = args;
-    const symbol   = TOKEN_IDS_TO_SYMBOL[tokenId] ?? 'UNKNOWN';
-    const dstChain = CHAIN_ID_TO_NAME[dstChainId.toString()] ?? 'unknown';
-
-    this.logger.log(`[${chain}] TokensLocked: ${symbol} ${ethers.formatUnits(amount,6)} from ${from} → ${dstChain}/${dstRecipient} (nonce=${nonce})`);
-
-    // Find matching pending BridgeTransfer by nonce + srcChain
-    const transfer = await this.prisma.bridgeTransfer.findFirst({
-      where: { srcChain:chain, nonce:nonce.toString(), status:{ in:['PENDING','LOCKED'] } },
-    });
-
-    if (transfer) {
-      await this.prisma.bridgeTransfer.update({
-        where: { id: transfer.id },
-        data:  { status:'LOCKED', srcTxHash: event?.log?.transactionHash ?? event?.transactionHash },
-      });
-      this.logger.log(`Bridge transfer ${transfer.id} confirmed LOCKED on ${chain}`);
-
-      // Notify bridge-service to proceed with relayer mint via Redis pub/sub
-      await this.redis.publish('bridge:locked', JSON.stringify({
-        transferId: transfer.id, chain, symbol, amount: ethers.formatUnits(amount,6),
-      }));
-    }
-  }
-
-  private async handleMintEvent(chain: string, args: any[]) {
-    const [tokenId, to, amount, srcChainId, nonceKey, event] = args;
-    const symbol = TOKEN_IDS_TO_SYMBOL[tokenId] ?? 'UNKNOWN';
-
-    this.logger.log(`[${chain}] TokensMinted: ${symbol} ${ethers.formatUnits(amount,6)} → ${to} (nonceKey=${nonceKey})`);
-
-    const transfer = await this.prisma.bridgeTransfer.findFirst({
-      where: { dstChain:chain, status:'LOCKED', dstAddress:to },
-      orderBy: { createdAt:'desc' },
-    });
-
-    if (transfer) {
-      await this.prisma.bridgeTransfer.update({
-        where: { id: transfer.id },
-        data:  { status:'COMPLETED', dstTxHash: event?.log?.transactionHash ?? event?.transactionHash },
-      });
-      this.logger.log(`Bridge transfer ${transfer.id} COMPLETED on ${chain}`);
-
-      await this.redis.publish('bridge:completed', JSON.stringify({
-        transferId: transfer.id, chain, symbol, amount: ethers.formatUnits(amount,6),
-      }));
-    }
-  }
-
-  private async handleBurnEvent(chain: string, args: any[]) {
-    const [tokenId, from, amount, srcChainId, srcRecipient, nonce, deadline, event] = args;
-    const symbol    = TOKEN_IDS_TO_SYMBOL[tokenId] ?? 'UNKNOWN';
-    const srcChain  = CHAIN_ID_TO_NAME[srcChainId.toString()] ?? 'unknown';
-
-    this.logger.log(`[${chain}] TokensBurned: ${symbol} ${ethers.formatUnits(amount,6)} from ${from} → unlock on ${srcChain}/${srcRecipient}`);
-
-    const transfer = await this.prisma.bridgeTransfer.findFirst({
-      where: { dstChain:chain, srcChain, nonce:nonce.toString(), status:{ in:['PENDING','LOCKED'] }, type:'BURN_UNLOCK' },
-    });
-
-    if (transfer) {
-      await this.prisma.bridgeTransfer.update({
-        where: { id: transfer.id },
-        data:  { status:'LOCKED', srcTxHash: event?.log?.transactionHash ?? event?.transactionHash },
-      });
-      await this.redis.publish('bridge:burned', JSON.stringify({
-        transferId: transfer.id, chain, symbol, amount: ethers.formatUnits(amount,6),
-      }));
-    }
-  }
-
-  private async handleUnlockEvent(chain: string, args: any[]) {
-    const [tokenId, to, amount, dstChainId, nonceKey, event] = args;
-    const symbol = TOKEN_IDS_TO_SYMBOL[tokenId] ?? 'UNKNOWN';
-
-    this.logger.log(`[${chain}] TokensUnlocked: ${symbol} ${ethers.formatUnits(amount,6)} → ${to}`);
-
-    const transfer = await this.prisma.bridgeTransfer.findFirst({
-      where: { srcChain:chain, status:'LOCKED', srcAddress:to, type:'BURN_UNLOCK' },
-      orderBy: { createdAt:'desc' },
-    });
-
-    if (transfer) {
-      await this.prisma.bridgeTransfer.update({
-        where: { id: transfer.id },
-        data:  { status:'COMPLETED', dstTxHash: event?.log?.transactionHash ?? event?.transactionHash },
-      });
-      await this.redis.publish('bridge:completed', JSON.stringify({
-        transferId: transfer.id, chain, symbol, amount: ethers.formatUnits(amount,6),
-      }));
-    }
-  }
 
   // ─── Polling-based listeners (TRON + fallback for chains without WSS) ─────────
 
@@ -864,11 +1011,7 @@ export class ListenerService implements OnModuleInit {
   // and throws the confusing "missing response for request" BAD_DATA
   // error seen in the logs — even though only ONE of the batched calls
   // actually failed.
-  private readonly EVM_CHAIN_IDS: Record<string, number> = {
-    ethereum: 11155111,
-    bsc:      97,
-    polygon:  80002,
-  };
+  
 
   private evmProviders: Record<string, ethers.JsonRpcProvider> = {};
 

@@ -101,3 +101,70 @@ export class PriceController {
     return this.svc.getLivePrices();
   }
 }
+
+// Separate, UNGUARDED controller — same pattern as PriceController above.
+// This is the public INRXScan-style explorer: anyone can list/search/filter
+// every INRX transaction (mint, burn, send/receive, swap, bridge) across
+// every chain, and look up any address, without a JWT — that's the entire
+// point of a public ledger explorer. It intentionally reads across ALL
+// wallets, not just the caller's own.
+@ApiTags('Explorer')
+@Controller('stablecoin/explorer')
+export class ExplorerController {
+  constructor(private svc: StablecoinService) {}
+
+  @Get('stats')
+  @ApiOperation({ summary: 'Live INRX stats: circulating supply, tx counts, active wallets' })
+  stats(@Query('token') token?: string) {
+    return this.svc.explorerStats(token);
+  }
+
+  @Get('networks')
+  @ApiOperation({ summary: 'Per-network display metadata: labels, native gas symbols, block explorer URLs' })
+  networks() {
+    return this.svc.explorerNetworks();
+  }
+
+  @Get('transactions')
+  @ApiOperation({ summary: 'List/search/filter INRX transactions across all wallets and chains' })
+  @ApiQuery({ name: 'page',   required: false })
+  @ApiQuery({ name: 'limit',  required: false })
+  @ApiQuery({ name: 'type',   required: false, description: 'SEND|MINT|BURN|BRIDGE_LOCK|BRIDGE_MINT|SWAP' })
+  @ApiQuery({ name: 'chain',  required: false, description: 'ethereum|bsc|polygon|tron|solana|all' })
+  @ApiQuery({ name: 'q',      required: false, description: 'search by tx hash or address' })
+  @ApiQuery({ name: 'from',   required: false, description: 'ISO date — start of range (inclusive)' })
+  @ApiQuery({ name: 'to',     required: false, description: 'ISO date — end of range (inclusive)' })
+  transactions(
+    @Query('page') page?: string, @Query('limit') limit?: string,
+    @Query('type') type?: string, @Query('chain') chain?: string, @Query('q') q?: string,
+    @Query('from') from?: string, @Query('to') to?: string,
+  ) {
+    return this.svc.explorerTransactions({
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      type, chain, q, from, to,
+    });
+  }
+
+  @Get('transactions/:hash')
+  @ApiOperation({ summary: 'Single INRX transaction by hash' })
+  transaction(@Param('hash') hash: string) {
+    return this.svc.explorerTransaction(hash);
+  }
+
+  @Get('address/:address')
+  @ApiOperation({ summary: 'INRX balance + transaction history for any address' })
+  @ApiQuery({ name: 'page',  required: false })
+  @ApiQuery({ name: 'limit', required: false })
+  @ApiQuery({ name: 'chain', required: false })
+  address(
+    @Param('address') address: string,
+    @Query('page') page?: string, @Query('limit') limit?: string, @Query('chain') chain?: string,
+  ) {
+    return this.svc.explorerAddress(address, {
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      chain,
+    });
+  }
+}

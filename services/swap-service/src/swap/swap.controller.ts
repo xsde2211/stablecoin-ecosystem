@@ -43,13 +43,15 @@ export class SwapController {
 
   @Get('history')
   @ApiOperation({ summary: 'This user\'s past swaps' })
-  @ApiQuery({ name: 'page',  required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'page',        required: false, type: Number })
+  @ApiQuery({ name: 'limit',       required: false, type: Number })
+  @ApiQuery({ name: 'walletIndex', required: false, type: Number, description: 'Scope to one wallet — omit to see swaps across all of this user\'s wallets' })
   history(
     @Req() req: any,
     @Query('page',  new DefaultValuePipe(1),  ParseIntPipe) page: number,
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+    @Query('walletIndex') walletIndex?: string,
   ) {
-    return this.svc.getHistory(req.user.sub, page, limit);
+    return this.svc.getHistory(req.user.sub, page, limit, walletIndex !== undefined ? parseInt(walletIndex, 10) : undefined);
   }
 }

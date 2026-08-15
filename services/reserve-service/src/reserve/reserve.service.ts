@@ -234,7 +234,7 @@ export class ReserveService {
     const map: Record<string,string|undefined> = {
       ethereum: process.env.ETH_RESERVE_VAULT_ADDRESS,
       bsc:      process.env.BSC_RESERVE_VAULT_ADDRESS,
-      polygon:  process.env.POLYGONAMOY_RESERVE_VAULT_ADDRESS,
+      polygon:  process.env.POLYGON_RESERVE_VAULT_ADDRESS,
     };
     if (!map[chain]) throw new BadRequestException(`ReserveVault not configured for: ${chain}`);
     return map[chain]!;

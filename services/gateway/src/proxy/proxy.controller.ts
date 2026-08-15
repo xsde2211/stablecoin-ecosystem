@@ -15,17 +15,22 @@ const PUBLIC_ROUTES = [
   '/docs',
 ];
 
-// Path PREFIXES (not just full paths) that are public — for dynamic segments
-const PUBLIC_PREFIXES = [
-  '/payments/',  // GET /payments/:id is scanned by wallet apps without auth
-];
+// Note: public path prefixes (payments, explorer) are each handled
+// explicitly inside isPublic() below, since their rules differ per prefix.
 
 function isPublic(method: string, path: string): boolean {
   if (PUBLIC_ROUTES.some(r => path === r || path.startsWith(r))) return true;
 
+  // GET /stablecoin/explorer/... — the whole point of a public ledger
+  // explorer is that nobody needs a JWT to browse it. Every route under
+  // this prefix (stats, transactions, transactions/:hash, address/:address)
+  // is read-only, so no method/sub-path narrowing needed, unlike /payments/
+  // below.
+  if (method === 'GET' && path.startsWith('/stablecoin/explorer/')) return true;
+
   // POST /payments/:id/paid is called by listener-service (internal) — also public
   // GET  /payments/:id      is called by wallet app after QR scan — public
-  if (PUBLIC_PREFIXES.some(p => path.startsWith(p))) {
+  if (path.startsWith('/payments/')) {
     // but /payments (list) and /payments/stats/overview and /payments (create) require auth
     const afterPrefix = path.slice('/payments/'.length);
     // afterPrefix looks like "<uuid>" or "<uuid>/paid" or "<uuid>/cancel" or "stats/overview"

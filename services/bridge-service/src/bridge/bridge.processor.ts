@@ -5,12 +5,36 @@ import { ethers }             from 'ethers';
 import { TronWeb }            from 'tronweb';
 import { derivePrivateKey }   from '@ecosystem/crypto';
 import { PrismaService }      from '../prisma/prisma.service';
-import { BridgeService }      from './bridge.service';
+import { BridgeService,TRON_BRIDGE_ABI }      from './bridge.service';
 import { KmsService }         from './kms.service';
 
 const ERC20_ABI = [
   'function approve(address spender, uint256 amount) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',
+];
+
+// TRC20 allowance/approve — same JSON-ABI-object convention as TRON_BRIDGE_ABI
+// in bridge.service.ts (TronWeb's contract() call expects this shape, not
+// human-readable signature strings the way the EVM ERC20_ABI above does).
+const TRC20_ALLOWANCE_ABI = [
+  {
+    inputs: [
+      { internalType: 'address', name: 'owner',   type: 'address' },
+      { internalType: 'address', name: 'spender', type: 'address' },
+    ],
+    name: 'allowance',
+    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
+    stateMutability: 'view', type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'address', name: 'spender', type: 'address' },
+      { internalType: 'uint256', name: 'amount',  type: 'uint256' },
+    ],
+    name: 'approve',
+    outputs: [{ internalType: 'bool', name: '', type: 'bool' }],
+    stateMutability: 'nonpayable', type: 'function',
+  },
 ];
 
 @Processor('bridge')
@@ -264,8 +288,26 @@ export class BridgeProcessor {
       fullHost:   process.env.TRON_RPC!,
       privateKey: userTronKey, // user's own key — same fix as the EVM side
     });
-    const bridge       = await tronWeb.contract().at(process.env.TRON_BRIDGE_V2_ADDRESS!);
-    const amountMicro  = BigInt(Math.round(parseFloat(data.amount) * 1_000_000)).toString();
+    const bridgeAddr  = process.env.TRON_BRIDGE_V2_ADDRESS!;
+    const tokenAddr   = this.getTokenAddress('tron', data.token);
+    const amountMicro = BigInt(Math.round(parseFloat(data.amount) * 1_000_000)).toString();
+
+    // THE FIX: TronBridge.lock() does transferFrom(msg.sender, bridge, amount)
+    // — identical pattern to the EVM side — which needs the USER to have
+    // approved the bridge to spend their tokens first. lockOnEVM() already
+    // checks-and-approves; this TRON path never did, which is exactly why
+    // every TRON-source lock reverted with "ERC20: insufficient allowance"
+    // even though the user's own wallet correctly held the tokens and paid
+    // the gas.
+    const tokenContract = await tronWeb.contract(TRC20_ALLOWANCE_ABI, tokenAddr);
+    const currentAllowance = await tokenContract.allowance(data.walletAddress, bridgeAddr).call();
+    if (BigInt(currentAllowance.toString()) < BigInt(amountMicro)) {
+      const MAX_UINT256 = (2n ** 256n - 1n).toString();
+      const approveTxId = await tokenContract.approve(bridgeAddr, MAX_UINT256).send({ feeLimit: 100_000_000 });
+      await this.bridgeSvc.verifyTronTx(tronWeb, approveTxId);
+    }
+
+    const bridge = await tronWeb.contract(TRON_BRIDGE_ABI, bridgeAddr);
 
     const txId = await bridge.lock(
       data.token, amountMicro,
@@ -273,15 +315,16 @@ export class BridgeProcessor {
       data.nonce.toString(), data.deadline.toString(),
     ).send({ feeLimit:200_000_000 });
 
-    // Same fix as executeTronMint/executeTronUnlock: .send() only confirms
-    // the tx was broadcast, not that it succeeded — verify before reporting
-    // this lock as done.
     await this.bridgeSvc.verifyTronTx(tronWeb, txId);
 
     return txId;
   }
-
   // ─── TRON burn ────────────────────────────────────────────────────────────
+  //
+  // No approve() needed here, unlike lockOnTron() above — TronBridge.burn()
+  // calls the TOKEN's burn(from, amount, reason) directly (role-gated via
+  // BURNER_ROLE already granted to the bridge contract), not a
+  // transferFrom()-based pull. Different pattern, no allowance involved.
 
   private async burnOnTron(data: any): Promise<string> {
     const userTronKey = await this.getUserTronPrivateKey(data.userId, data.walletAddress);
@@ -289,7 +332,7 @@ export class BridgeProcessor {
       fullHost:   process.env.TRON_RPC!,
       privateKey: userTronKey,
     });
-    const bridge      = await tronWeb.contract().at(process.env.TRON_BRIDGE_V2_ADDRESS!);
+    const bridge      = await tronWeb.contract(TRON_BRIDGE_ABI, process.env.TRON_BRIDGE_V2_ADDRESS!);
     const amountMicro = BigInt(Math.round(parseFloat(data.amount) * 1_000_000)).toString();
 
     const txId = await bridge.burn(

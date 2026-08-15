@@ -11,6 +11,7 @@ import { RedisService }  from '../redis/redis.service';
 import { MintDto }       from './dto/mint.dto';
 import { BurnDto }       from './dto/burn.dto';
 import { TxType} from '@prisma/client';
+import { NETWORKS, explorerTxUrl, explorerAddressUrl } from './networks.config';
 
 // Full token ABI matching our INRX/EGold/ESilver contracts
 const TOKEN_ABI = [
@@ -28,6 +29,61 @@ const TOKEN_ABI = [
   'function name() view returns (string)',
   'function symbol() view returns (string)',
   'function decimals() view returns (uint8)',
+];
+
+// TronWeb needs JSON-format ABI objects (name/type/inputs/outputs), NOT the
+// ethers-style human-readable strings TOKEN_ABI above uses — the two are
+// incompatible formats, TOKEN_ABI can't be reused as-is for Tron calls.
+// This also sidesteps tronWeb.contract().at()'s auto-fetch-the-ABI-from-
+// TronGrid behavior entirely. That auto-fetch turned out to be unreliable
+// for more than just the read-only balance path — it's the same cause
+// behind "contract.burn is not a function" in burnTronTokens/
+// mintTronTokens below (methods never got attached, no thrown error
+// pointing at why). Passing the ABI explicitly means no network
+// round-trip to resolve it, and no dependency on that resolution
+// succeeding — used for every Tron contract interaction in this file now,
+// not just balance reads.
+const TRON_TOKEN_ABI = [
+  {
+    constant: true,
+    inputs: [{ name: '_owner', type: 'address' }],
+    name: 'balanceOf',
+    outputs: [{ name: 'balance', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    constant: true,
+    inputs: [],
+    name: 'paused',
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    constant: false,
+    inputs: [
+      { name: 'to', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'reason', type: 'string' },
+    ],
+    name: 'mint',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    constant: false,
+    inputs: [
+      { name: 'from', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'reason', type: 'string' },
+    ],
+    name: 'burn',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
 ];
 
 // OracleManager ABI — for reading gold/silver prices, and now writing live updates
@@ -185,7 +241,7 @@ export class StablecoinService implements OnModuleInit {
     return keys;
   }
 
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
   async pushLiveOraclePrices() {
     try {
       await this.updateAllLiveOraclePrices();
@@ -423,8 +479,8 @@ export class StablecoinService implements OnModuleInit {
     this.logger.warn(`Direct mint called by ${requestedBy} — bypasses timelock!`);
 
     if (dto.chain === 'tron') {
-      const txHash = await this.mintTronTokens(dto);
-      await this.recordTx(txHash, dto.chain, 'MINT', dto.amount, dto.token, 'treasury', dto.toAddress, requestedBy);
+      const { txHash, blockNumber, feeAmount, feeSymbol } = await this.mintTronTokens(dto);
+      await this.recordTx(txHash, dto.chain, 'MINT', dto.amount, dto.token, 'treasury', dto.toAddress, requestedBy, { blockNumber, feeAmount, feeSymbol });
       this.logger.log(`Minted ${dto.amount} ${dto.token} to ${dto.toAddress} on tron`);
       return { txHash, status: 'CONFIRMED' };
     }
@@ -444,8 +500,9 @@ export class StablecoinService implements OnModuleInit {
     const parsed  = ethers.parseUnits(dto.amount, 6);
     const tx      = await contract.mint(dto.toAddress, parsed, dto.reason);
     const receipt = await tx.wait();
+    const { feeAmount, feeSymbol } = this.evmFee(receipt, dto.chain);
 
-    await this.recordTx(receipt.hash, dto.chain, 'MINT', dto.amount, dto.token, 'treasury', dto.toAddress, requestedBy);
+    await this.recordTx(receipt.hash, dto.chain, 'MINT', dto.amount, dto.token, 'treasury', dto.toAddress, requestedBy, { blockNumber: receipt.blockNumber, feeAmount, feeSymbol });
     this.logger.log(`Minted ${dto.amount} ${dto.token} to ${dto.toAddress} on ${dto.chain}`);
     return { txHash:receipt.hash, status:'CONFIRMED' };
   }
@@ -454,8 +511,8 @@ export class StablecoinService implements OnModuleInit {
 
   async burnTokens(dto: BurnDto, requestedBy: string) {
     if (dto.chain === 'tron') {
-      const txHash = await this.burnTronTokens(dto);
-      await this.recordTx(txHash, dto.chain, 'BURN', dto.amount, dto.token, dto.fromAddress, 'treasury', requestedBy);
+      const { txHash, blockNumber, feeAmount, feeSymbol } = await this.burnTronTokens(dto);
+      await this.recordTx(txHash, dto.chain, 'BURN', dto.amount, dto.token, dto.fromAddress, 'treasury', requestedBy, { blockNumber, feeAmount, feeSymbol });
       this.logger.log(`Burned ${dto.amount} ${dto.token} from ${dto.fromAddress} on tron`);
       return { txHash, status: 'CONFIRMED' };
     }
@@ -471,17 +528,33 @@ export class StablecoinService implements OnModuleInit {
     const parsed   = ethers.parseUnits(dto.amount, 6);
     const tx       = await contract.burn(dto.fromAddress, parsed, dto.reason);
     const receipt  = await tx.wait();
+    const { feeAmount, feeSymbol } = this.evmFee(receipt, dto.chain);
 
-    await this.recordTx(receipt.hash, dto.chain, 'BURN', dto.amount, dto.token, dto.fromAddress, 'treasury', requestedBy);
+    await this.recordTx(receipt.hash, dto.chain, 'BURN', dto.amount, dto.token, dto.fromAddress, 'treasury', requestedBy, { blockNumber: receipt.blockNumber, feeAmount, feeSymbol });
     this.logger.log(`Burned ${dto.amount} ${dto.token} from ${dto.fromAddress} on ${dto.chain}`);
     return { txHash:receipt.hash, status:'CONFIRMED' };
+  }
+
+  // EVM gas fee = gasUsed * effective gasPrice, always denominated in the
+  // chain's native currency (18 decimals) regardless of the token's own
+  // decimals — hence formatEther, not formatUnits(...,6).
+  private evmFee(receipt: any, chain: string): { feeAmount: string | null; feeSymbol: string | null } {
+    try {
+      const gasUsed  = receipt.gasUsed as bigint;
+      const gasPrice = receipt.gasPrice ?? receipt.effectiveGasPrice;
+      if (gasUsed == null || gasPrice == null) return { feeAmount: null, feeSymbol: null };
+      const feeWei = gasUsed * (gasPrice as bigint);
+      return { feeAmount: ethers.formatEther(feeWei), feeSymbol: NETWORKS[chain]?.nativeSymbol ?? null };
+    } catch {
+      return { feeAmount: null, feeSymbol: null };
+    }
   }
 
   // ─── TRON mint/burn — same contract source as EVM, compiled for TVM, so the
   // mint(address,uint256,string)/burn(address,uint256,string) interface is
   // identical; only the calling mechanism (TronWeb vs ethers) differs. ───────
 
-  private async mintTronTokens(dto: MintDto): Promise<string> {
+  private async mintTronTokens(dto: MintDto): Promise<{ txHash: string; blockNumber: number | null; feeAmount: string | null; feeSymbol: string | null }> {
     const tokenAddr = this.getTronTokenAddress(dto.token);
     const minterKey = process.env.MINTER_TRON_PRIVATE_KEY;
     if (!minterKey) throw new BadRequestException('MINTER_TRON_PRIVATE_KEY not set — cannot mint directly');
@@ -491,16 +564,18 @@ export class StablecoinService implements OnModuleInit {
       privateKey: minterKey,
       headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
     });
-    const contract = await tronWeb.contract().at(tokenAddr);
+    // Explicit ABI, not .at() — see TRON_TOKEN_ABI's comment above.
+    const contract = tronWeb.contract(TRON_TOKEN_ABI, tokenAddr);
 
     const paused = await contract.paused().call();
     if (paused) throw new BadRequestException(`${dto.token} is paused on tron`);
 
     const amountMicro = BigInt(Math.round(parseFloat(dto.amount) * 1_000_000)).toString();
-    return contract.mint(dto.toAddress, amountMicro, dto.reason).send({ feeLimit: 150_000_000 });
+    const txHash = await contract.mint(dto.toAddress, amountMicro, dto.reason).send({ feeLimit: 150_000_000 });
+    return { txHash, ...(await this.tronFee(tronWeb, txHash)) };
   }
 
-  private async burnTronTokens(dto: BurnDto): Promise<string> {
+  private async burnTronTokens(dto: BurnDto): Promise<{ txHash: string; blockNumber: number | null; feeAmount: string | null; feeSymbol: string | null }> {
     const tokenAddr = this.getTronTokenAddress(dto.token);
     const burnerKey = process.env.BURNER_TRON_PRIVATE_KEY;
     if (!burnerKey) throw new BadRequestException('BURNER_TRON_PRIVATE_KEY not set — cannot burn directly');
@@ -510,10 +585,34 @@ export class StablecoinService implements OnModuleInit {
       privateKey: burnerKey,
       headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
     });
-    const contract = await tronWeb.contract().at(tokenAddr);
+    // Explicit ABI, not .at() — see TRON_TOKEN_ABI's comment above.
+    const contract = tronWeb.contract(TRON_TOKEN_ABI, tokenAddr);
 
     const amountMicro = BigInt(Math.round(parseFloat(dto.amount) * 1_000_000)).toString();
-    return contract.burn(dto.fromAddress, amountMicro, dto.reason).send({ feeLimit: 150_000_000 });
+    const txHash = await contract.burn(dto.fromAddress, amountMicro, dto.reason).send({ feeLimit: 150_000_000 });
+    return { txHash, ...(await this.tronFee(tronWeb, txHash)) };
+  }
+
+  // Tron doesn't return fee/block info from .send() itself — has to be
+  // looked up separately via getTransactionInfo() once the transaction is
+  // on a solidity node. `fee` comes back in SUN (1 TRX = 1,000,000 SUN).
+  // Non-fatal if this lookup fails (e.g. not yet indexed) — the mint/burn
+  // itself already succeeded, so we still return the txHash either way,
+  // just without fee/block info attached.
+  private async tronFee(tronWeb: TronWeb, txHash: string): Promise<{ blockNumber: number | null; feeAmount: string | null; feeSymbol: string | null }> {
+    try {
+      await new Promise(r => setTimeout(r, 3000)); // brief delay before info is queryable
+      const info: any = await tronWeb.trx.getTransactionInfo(txHash);
+      if (!info?.blockNumber) return { blockNumber: null, feeAmount: null, feeSymbol: null };
+      const feeSun = info.fee ?? 0;
+      return {
+        blockNumber: info.blockNumber,
+        feeAmount: (feeSun / 1_000_000).toFixed(6),
+        feeSymbol: NETWORKS.tron.nativeSymbol,
+      };
+    } catch {
+      return { blockNumber: null, feeAmount: null, feeSymbol: null };
+    }
   }
 
   private getTronTokenAddress(token: string): string {
@@ -532,6 +631,7 @@ export class StablecoinService implements OnModuleInit {
   private async recordTx(
     txHash: string, chain: string, type: string, amount: string,
     token: string, from: string, to: string, userId: string,
+    extra: { blockNumber?: number | null; feeAmount?: string | null; feeSymbol?: string | null } = {},
   ) {
     const wallet = await this.prisma.wallet.findFirst({
       where: { userId, chain },
@@ -553,6 +653,8 @@ export class StablecoinService implements OnModuleInit {
       chain, type: type as TxType, amount, tokenSymbol: token,
       fromAddress: from, toAddress: to, status: 'CONFIRMED' as const,
       confirmedAt: new Date(),
+      ...(extra.blockNumber != null ? { blockNumber: BigInt(extra.blockNumber) } : {}),
+      ...(extra.feeAmount != null ? { metadata: { feeAmount: extra.feeAmount, feeSymbol: extra.feeSymbol } } : {}),
     };
 
     await Promise.all([
@@ -648,5 +750,607 @@ export class StablecoinService implements OnModuleInit {
       polygon:  process.env.POLYGON_RESERVE_VAULT_ADDRESS,
     };
     return map[chain];
+  }
+
+  private getBridgeAddress(chain: string): string | undefined {
+    const map: Record<string,string|undefined> = {
+      ethereum: process.env.ETH_BRIDGE_V2_ADDRESS,
+      bsc:      process.env.BSC_BRIDGE_V2_ADDRESS,
+      polygon:  process.env.POLYGON_BRIDGE_V2_ADDRESS,
+      tron:     process.env.TRON_BRIDGE_V2_ADDRESS,
+    };
+    return map[chain];
+  }
+
+  // Read-only TronWeb instance — no private key needed for .call()/getTransactionInfo()
+  // lookups, only for the mint/burn .send() calls elsewhere in this file.
+  // TronWeb's constant-contract simulation (what .call() uses under the
+  // hood for view functions like balanceOf) builds its request using
+  // tronWeb.defaultAddress as the owner_address — without a privateKey (or
+  // an explicit address) set on the instance, defaultAddress stays unset
+  // and TronGrid's triggerconstantcontract endpoint can silently fail or
+  // return a zeroed/garbage result rather than a clean error, which is
+  // exactly what was making every Tron balance read come back as 0/null.
+  // This never signs or broadcasts anything — only .call()/
+  // getTransactionInfo() are ever used through this instance — so reusing
+  // MINTER_TRON_PRIVATE_KEY here purely to give TronWeb an address context
+  // for read simulation is safe.
+  private getReadOnlyTronWeb(): TronWeb {
+    const key = process.env.MINTER_TRON_PRIVATE_KEY || process.env.BURNER_TRON_PRIVATE_KEY;
+    if (!key) {
+      this.logger.warn('getReadOnlyTronWeb: neither MINTER_TRON_PRIVATE_KEY nor BURNER_TRON_PRIVATE_KEY is set — Tron reads may fail without a signer context');
+    }
+    return new TronWeb({
+      fullHost: process.env.TRON_RPC!,
+      ...(key ? { privateKey: key } : {}),
+      headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+    });
+  }
+
+  // Live on-chain balanceOf(address) read for INRX on any chain — this is
+  // what explorerAddress() uses for balance now, instead of summing
+  // recorded Transaction rows, so it always matches the real contract
+  // state even if a row was ever missed by both the direct-call path and
+  // listener-service. Returns null (not 0) on any failure, so callers can
+  // tell "confirmed zero balance" apart from "couldn't read the chain".
+  private async liveBalanceOf(chain: string, holderAddress: string): Promise<string | null> {
+    try {
+      if (chain === 'tron') {
+        const tronWeb = this.getReadOnlyTronWeb();
+        // tronWeb.contract(ABI, address) — passing the ABI explicitly is
+        // synchronous and needs no ABI lookup from TronGrid at all, unlike
+        // .contract().at(address) (no ABI passed), which auto-fetches the
+        // ABI over the network and was failing to attach any methods here
+        // (hence "contract.balanceOf is not a function" with no deeper
+        // error surfaced — the fetch/attach step failed silently).
+        const contract = tronWeb.contract(TRON_TOKEN_ABI, this.getTronTokenAddress('INRX'));
+        // Normalize to BASE58 (T...) before the call — TronWeb's contract
+        // ABI encoder is built around base58 addresses; a raw 41-prefixed
+        // hex string (no 0x) isn't reliably recognized as an address
+        // parameter and can get silently mis-encoded into the calldata.
+        const normalizedHolder = this.toDisplayAddress(holderAddress, 'tron');
+        const raw = await contract.balanceOf(normalizedHolder).call();
+        return ethers.formatUnits(raw.toString(), 6);
+      }
+      if (chain === 'solana') return null; // INRX on Solana isn't wired up yet
+      const provider = this.getProvider(chain);
+      const contract = new ethers.Contract(this.getTokenAddress('INRX', chain), TOKEN_ABI, provider);
+      const raw: bigint = await contract.balanceOf(holderAddress);
+      return ethers.formatUnits(raw, 6);
+    } catch (err: any) {
+      // Previously swallowed silently, which made "contract reverted",
+      // "bad RPC/API key", and "malformed address" all look identical from
+      // the outside (just an empty tile). Logging this doesn't change the
+      // null-on-failure contract for callers, it just makes the actual
+      // cause visible in the service logs when a balance unexpectedly
+      // doesn't show up.
+      this.logger.warn(`liveBalanceOf(${chain}, ${holderAddress}) failed: ${err?.message ?? err}`);
+      return null;
+    }
+  }
+
+  // Live fee/block lookup for a confirmed tx — used by decorateTx() as a
+  // fallback whenever a row doesn't already have fee/block cached in its
+  // `metadata`/`blockNumber` columns (e.g. it was written by
+  // listener-service picking up a plain transfer nobody initiated via the
+  // mint/burn/swap endpoints, which never captured fee data in the first
+  // place). Costs one RPC call per network's node/API — see the caching
+  // note on decorateTx() for why this doesn't mean one RPC call on every
+  // single page view forever.
+  private async fetchLiveFeeAndBlock(chain: string, txHash: string): Promise<{ blockNumber: number | null; feeAmount: string | null; feeSymbol: string | null }> {
+    if (!txHash) return { blockNumber: null, feeAmount: null, feeSymbol: null };
+    try {
+      if (chain === 'tron') {
+        const tronWeb = this.getReadOnlyTronWeb();
+        const info: any = await tronWeb.trx.getTransactionInfo(txHash);
+        if (!info?.blockNumber) return { blockNumber: null, feeAmount: null, feeSymbol: null };
+        return {
+          blockNumber: info.blockNumber,
+          feeAmount: ((info.fee ?? 0) / 1_000_000).toFixed(6),
+          feeSymbol: NETWORKS.tron.nativeSymbol,
+        };
+      }
+      if (chain === 'solana') return { blockNumber: null, feeAmount: null, feeSymbol: null };
+      const provider = this.getProvider(chain);
+      const receipt = await provider.getTransactionReceipt(txHash);
+      if (!receipt) return { blockNumber: null, feeAmount: null, feeSymbol: null };
+      const { feeAmount, feeSymbol } = this.evmFee(receipt, chain);
+      return { blockNumber: receipt.blockNumber, feeAmount, feeSymbol };
+    } catch (err: any) {
+      this.logger.warn(`fetchLiveFeeAndBlock(${chain}, ${txHash}) failed: ${err?.message ?? err}`);
+      return { blockNumber: null, feeAmount: null, feeSymbol: null };
+    }
+  }
+
+  // ─── Public Explorer ────────────────────────────────────────────────────
+  // Unlike every other method in this class, these read ACROSS ALL WALLETS,
+  // not just the requesting user's own — that's the entire point of a public
+  // explorer (anyone can look up any hash/address, the same way Etherscan
+  // doesn't require you to own an address to view it). Only ever called from
+  // the unguarded ExplorerController below — never add @UseGuards to that.
+
+  readonly EXPLORER_CHAINS = ['ethereum', 'bsc', 'polygon', 'tron', 'solana'];
+  // 'RECEIVE' is intentionally not filterable — a wallet-to-wallet transfer
+  // writes ONE row per side (sender's wallet gets 'SEND', recipient's
+  // wallet gets 'RECEIVE'), which is correct for each user's own history
+  // view, but the public explorer shows ONE transaction per on-chain event,
+  // not two. See dedupeTxRows() below for how the pair is collapsed.
+  private readonly EXPLORER_TYPES = ['SEND','MINT','BURN','BRIDGE_LOCK','BRIDGE_MINT','SWAP'];
+
+  // How many raw rows we pull per source (Transaction table, BridgeTransfer
+  // table) before de-duplicating/merging/paginating in application code.
+  // This is NOT a true DB-level paginated query once bridge rows are
+  // involved — see the long comment on mergeAndPaginate() below for why,
+  // and what to do once real traffic outgrows this.
+  private readonly EXPLORER_WINDOW = 3000;
+
+  // TronGrid / raw event data sometimes carries addresses in hex ("41..." or
+  // "0x41...") instead of base58; some direct-mint/burn callers may also
+  // pass hex. Every address we hand back to the explorer UI must be base58
+  // (T...) for tron, matching what a human actually recognizes as a Tron
+  // address (the same normalization listener-service already applies before
+  // it writes rows — this covers rows that predate that fix, or that came
+  // from elsewhere without going through it).
+  private toDisplayAddress(address: string, chain: string): string {
+    if (chain !== 'tron' || !address) return address;
+    if (address.startsWith('T')) return address; // already base58
+    // NOTE: (?:41)? — a non-capturing group makes "41" optional as a whole.
+    // Writing this as `41?` (no earlier version's bug) would instead mean
+    // "literal 4, then optional 1", which only ever matched hex strings
+    // that already happened to start with "4" — i.e. real Tron hex
+    // addresses (always 41-prefixed), never a plain EVM address, silently
+    // leaving those unconverted.
+    if (!/^(0x)?(?:41)?[0-9a-fA-F]+$/.test(address)) return address; // not hex-shaped, leave it
+    try {
+      const stripped = address.replace(/^0x/, '');
+      const withPrefix = stripped.startsWith('41') ? stripped : `41${stripped}`;
+      return TronWeb.address.fromHex(withPrefix);
+    } catch {
+      return address; // malformed — surface the raw value rather than throw
+    }
+  }
+
+  // EVM and Tron both use secp256k1 — a Tron address is just
+  // Base58Check(0x41 + <same 20-byte hash an Ethereum address is>), so an
+  // address on one chain and its "equivalent" on the other are the exact
+  // same 20 bytes, just encoded differently, WHENEVER the same private key
+  // was used to generate both. That's true for this project's own
+  // addresses (the treasury/bridge/test wallets deliberately reuse one key
+  // across EVM chains and Tron — see MINTER_PRIVATE_KEY vs
+  // MINTER_TRON_PRIVATE_KEY), so deriving one from the other is a correct,
+  // meaningful lookup here. It is NOT guaranteed to hold for two
+  // independently-generated wallets a real user happens to own — the
+  // frontend should label this as "if this address's key is reused across
+  // chains", not assert it as fact for arbitrary addresses.
+  private deriveRelatedAddresses(address: string): { evmAddress: string; tronAddress: string } | null {
+    if (/^0x[0-9a-fA-F]{40}$/.test(address)) {
+      try {
+        const tronAddress = TronWeb.address.fromHex(`41${address.slice(2)}`);
+        return { evmAddress: address, tronAddress };
+      } catch {
+        return null;
+      }
+    }
+    if (/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address)) {
+      try {
+        const hex = TronWeb.address.toHex(address); // "41" + 40 hex chars
+        return { evmAddress: `0x${hex.slice(2)}`, tronAddress: address };
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // NOTE: async now — see the live-fetch fallback below. Every call site
+  // must `await` this (single tx) or `Promise.all(rows.map(...))` (lists).
+  private async decorateTx(tx: any) {
+    const chain = tx.chain;
+    let blockNumber = tx.blockNumber ? Number(tx.blockNumber) : null;
+    let fee = tx.metadata?.feeAmount != null
+      ? { amount: tx.metadata.feeAmount, symbol: tx.metadata.feeSymbol }
+      : null;
+
+    // Most rows don't have fee/block cached — recordTx() only captures it
+    // for transactions that went through the direct mint/burn/swap
+    // endpoints; anything listener-service picked up on its own (a plain
+    // transfer nobody in this system initiated) never had it captured.
+    // Rather than leave those permanently blank, fetch it live from the
+    // network the first time it's viewed, and cache the result back onto
+    // the row (best-effort — never blocks or fails the response) so every
+    // later view of the same transaction is instant and RPC-free.
+    if ((blockNumber == null || fee == null) && tx.txHash && tx.status === 'CONFIRMED') {
+      const live = await this.fetchLiveFeeAndBlock(chain, tx.txHash);
+      if (blockNumber == null && live.blockNumber != null) blockNumber = live.blockNumber;
+      if (fee == null && live.feeAmount != null) fee = { amount: live.feeAmount, symbol: live.feeSymbol };
+
+      if (tx.id && (live.blockNumber != null || live.feeAmount != null)) {
+        this.prisma.transaction.update({
+          where: { id: tx.id },
+          data: {
+            ...(live.blockNumber != null ? { blockNumber: BigInt(live.blockNumber) } : {}),
+            ...(live.feeAmount != null ? { metadata: { ...(tx.metadata ?? {}), feeAmount: live.feeAmount, feeSymbol: live.feeSymbol } } : {}),
+          },
+        }).catch(() => {}); // best-effort cache write — a failure here must never affect what's shown
+      }
+    }
+
+    return {
+      txHash:      tx.txHash,
+      chain,
+      chainLabel:  NETWORKS[chain]?.label ?? chain,
+      // A RECEIVE row and its paired SEND row describe the exact same
+      // on-chain transfer from two wallets' perspectives — the public
+      // explorer only ever shows one "SEND" per transfer, never the
+      // internal RECEIVE label (see EXPLORER_TYPES comment above).
+      type:        tx.type === 'RECEIVE' ? 'SEND' : tx.type,
+      status:      tx.status,
+      tokenSymbol: tx.tokenSymbol,
+      amount:      tx.amount?.toString?.() ?? tx.amount,
+      fromAddress: this.toDisplayAddress(tx.fromAddress, chain),
+      toAddress:   this.toDisplayAddress(tx.toAddress, chain),
+      blockNumber,
+      fee,
+      explorerUrl: explorerTxUrl(chain, tx.txHash),
+      metadata:    tx.metadata ?? null,
+      createdAt:   tx.createdAt,
+      confirmedAt: tx.confirmedAt,
+    };
+  }
+
+  // Collapses a SEND/RECEIVE pair for the same txHash into one row (prefers
+  // the SEND-side row, since it's written by whoever initiated the
+  // transfer and is the more "canonical" side — but if only a RECEIVE row
+  // exists, e.g. an incoming transfer whose sender isn't one of our
+  // registered wallets, that row still surfaces, just displayed as SEND by
+  // decorateTx above rather than being dropped). MINT/BURN/SWAP rows never
+  // collide with each other by txHash+walletId the same way, so they pass
+  // through untouched. Rows with a null txHash (still-PENDING, no on-chain
+  // hash yet) are never merged with each other.
+  private dedupeTxRows(rows: any[]): any[] {
+    const byHash = new Map<string, any>();
+    const passthrough: any[] = [];
+    for (const row of rows) {
+      if (!row.txHash) { passthrough.push(row); continue; }
+      const key = row.txHash.toLowerCase();
+      const existing = byHash.get(key);
+      if (!existing) { byHash.set(key, row); continue; }
+      const existingIsReceive = existing.type === 'RECEIVE';
+      const rowIsReceive      = row.type === 'RECEIVE';
+      if (existingIsReceive && !rowIsReceive) byHash.set(key, row); // prefer non-RECEIVE
+      // else keep whichever is already there
+    }
+    return [...byHash.values(), ...passthrough];
+  }
+
+  private dateRangeWhere(from?: string, to?: string): any {
+    if (!from && !to) return undefined;
+    const range: any = {};
+    if (from) { const d = new Date(from); if (!isNaN(d.getTime())) range.gte = d; }
+    if (to)   { const d = new Date(to);   if (!isNaN(d.getTime())) { d.setHours(23, 59, 59, 999); range.lte = d; } }
+    return Object.keys(range).length ? range : undefined;
+  }
+
+  // BridgeTransfer rows live in a completely different table/shape than
+  // Transaction (srcChain+dstChain+two separate tx hashes instead of one
+  // chain+one hash) — nothing currently writes a BRIDGE_LOCK/BRIDGE_MINT
+  // row into Transaction, so bridge activity was invisible to the explorer
+  // entirely. This expands each matching BridgeTransfer into up to two
+  // Transaction-shaped rows (a BRIDGE_LOCK leg on the source chain, a
+  // BRIDGE_MINT leg on the destination chain) so it flows through the same
+  // decorateTx()/pagination path as everything else.
+  private async fetchBridgeLegs(opts: {
+    token: string; type?: string; chain?: string; q?: string; dateRange?: any;
+  }): Promise<any[]> {
+    if (opts.type && opts.type !== 'BRIDGE_LOCK' && opts.type !== 'BRIDGE_MINT') return [];
+
+    const where: any = { token: opts.token };
+    if (opts.dateRange) where.createdAt = opts.dateRange;
+    if (opts.chain) where.OR = [{ srcChain: opts.chain }, { dstChain: opts.chain }];
+    if (opts.q) {
+      const q = opts.q;
+      where.OR = [
+        ...(where.OR ?? []),
+        { srcTxHash:  { contains: q, mode: 'insensitive' } },
+        { dstTxHash:  { contains: q, mode: 'insensitive' } },
+        { srcAddress: { contains: q, mode: 'insensitive' } },
+        { dstAddress: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    const transfers = await this.prisma.bridgeTransfer.findMany({
+      where, orderBy: { createdAt: 'desc' }, take: this.EXPLORER_WINDOW,
+    });
+
+    const legs: any[] = [];
+    for (const t of transfers) {
+      const wantLock = !opts.type || opts.type === 'BRIDGE_LOCK';
+      const wantMint = !opts.type || opts.type === 'BRIDGE_MINT';
+      const chainOk = (c: string) => !opts.chain || opts.chain === c;
+
+      if (wantLock && t.srcTxHash && chainOk(t.srcChain)) {
+        legs.push({
+          txHash: t.srcTxHash, chain: t.srcChain, type: 'BRIDGE_LOCK',
+          status: 'CONFIRMED', tokenSymbol: t.token, amount: t.amount,
+          fromAddress: t.srcAddress, toAddress: 'bridge-lock',
+          blockNumber: null, metadata: { bridgeTransferId: t.id, dstChain: t.dstChain },
+          createdAt: t.createdAt, confirmedAt: t.createdAt,
+        });
+      }
+      if (wantMint && t.dstTxHash && chainOk(t.dstChain)) {
+        legs.push({
+          txHash: t.dstTxHash, chain: t.dstChain, type: 'BRIDGE_MINT',
+          status: t.status === 'COMPLETED' || t.status === 'MINTED' ? 'CONFIRMED' : 'PENDING',
+          tokenSymbol: t.token, amount: t.amount,
+          fromAddress: 'bridge-mint', toAddress: t.dstAddress,
+          blockNumber: null, metadata: { bridgeTransferId: t.id, srcChain: t.srcChain },
+          createdAt: t.createdAt, confirmedAt: t.createdAt,
+        });
+      }
+    }
+    return legs;
+  }
+
+  async explorerStats(token = 'INRX') {
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const [supplyInfo, totalTxCount, tx24h, walletRows, bridgeLocked] = await Promise.all([
+      this.getTokenInfoAllChains(token).catch(() => [] as any[]),
+      this.prisma.transaction.count({ where: { tokenSymbol: token } }),
+      this.prisma.transaction.count({ where: { tokenSymbol: token, createdAt: { gte: dayAgo } } }),
+      this.prisma.transaction.findMany({
+        where: { tokenSymbol: token },
+        distinct: ['walletId'],
+        select: { walletId: true },
+      }),
+      // How much INRX is currently sitting in each chain's bridge contract
+      // — a live balanceOf(bridgeAddress) read per chain, same mechanism
+      // as explorerAddress()'s per-network balances.
+      Promise.all(
+        this.EXPLORER_CHAINS.filter(c => c !== 'solana').map(async c => {
+          const bridgeAddr = this.getBridgeAddress(c);
+          if (!bridgeAddr) return null;
+          const balance = await this.liveBalanceOf(c, bridgeAddr);
+          return balance != null ? { chain: c, chainLabel: NETWORKS[c]?.label ?? c, address: bridgeAddr, balance } : null;
+        }),
+      ).then(rows => rows.filter((r): r is NonNullable<typeof r> => r != null)),
+    ]);
+
+    // circulatingSupply from getTokenInfoAllChains is already a formatted
+    // decimal string (ethers.formatUnits) per chain — sum across EVM chains.
+    // Tron's on-chain supply isn't included here (getTokenInfoAllChains only
+    // covers ethereum/bsc/polygon); tron transactions are still fully
+    // covered by the transaction list/filter below.
+    const circulatingSupply = supplyInfo.reduce((sum: number, i: any) => {
+      const c = parseFloat(i?.circulatingSupply ?? '0');
+      return Number.isFinite(c) ? sum + c : sum;
+    }, 0);
+
+    const totalBridgeLocked = bridgeLocked.reduce((s, r) => s + Number(r.balance), 0).toFixed(2);
+
+    // Real, verifiable contract addresses per chain — no RPC calls needed
+    // (these come straight from env config), used for a "verified
+    // contracts" trust section on the frontend. This is deliberately just
+    // facts (address + a link anyone can check on that chain's own block
+    // explorer) rather than any claim this service can't actually back up.
+    const contracts = this.EXPLORER_CHAINS.filter(c => c !== 'solana').map(c => {
+      try {
+        const address = c === 'tron' ? this.getTronTokenAddress(token) : this.getTokenAddress(token, c);
+        return { chain: c, chainLabel: NETWORKS[c]?.label ?? c, address, explorerUrl: explorerAddressUrl(c, address) };
+      } catch {
+        return null;
+      }
+    }).filter((r): r is NonNullable<typeof r> => r != null);
+
+    return {
+      token,
+      circulatingSupply: circulatingSupply.toFixed(2),
+      totalTxCount,
+      tx24h,
+      activeWallets: walletRows.length,
+      bridgeLockedByNetwork: bridgeLocked,
+      totalBridgeLocked,
+      contracts,
+      chains: this.EXPLORER_CHAINS,
+      networks: NETWORKS,
+      perChainSupply: supplyInfo,
+    };
+  }
+
+  // GET /stablecoin/explorer/networks — single source of truth for chain
+  // display labels, native gas symbols, and block-explorer URL templates.
+  // The frontend (and the Node BFF) fetch this instead of hardcoding
+  // network metadata, so a mainnet cutover only ever touches
+  // networks.config.ts.
+  explorerNetworks() {
+    return { networks: NETWORKS, keys: this.EXPLORER_CHAINS };
+  }
+
+  async explorerTransactions(opts: {
+    token?: string; page?: number; limit?: number;
+    type?: string; chain?: string; q?: string; from?: string; to?: string;
+  }) {
+    const token = opts.token || 'INRX';
+    const page  = Math.max(1, opts.page || 1);
+    const limit = Math.min(100, Math.max(1, opts.limit || 25));
+    const type  = opts.type && this.EXPLORER_TYPES.includes(opts.type) ? opts.type : undefined;
+    const chain = opts.chain && opts.chain !== 'all' ? opts.chain : undefined;
+    const q     = opts.q?.trim();
+    const dateRange = this.dateRangeWhere(opts.from, opts.to);
+
+    const where: any = { tokenSymbol: token };
+    // 'SEND' in the UI means "any transfer, shown once" — that covers rows
+    // actually stored as SEND *and* stand-alone RECEIVE rows (see
+    // dedupeTxRows). Every other type filters exactly as stored.
+    if (type === 'SEND') where.type = { in: ['SEND', 'RECEIVE'] };
+    else if (type)        where.type = type as TxType;
+    else                   where.type = { not: 'RECEIVE' as TxType }; // RECEIVE rows only survive if no SEND pair exists — handled by the second query below
+    if (chain) where.chain = chain;
+    if (dateRange) where.createdAt = dateRange;
+    if (q) {
+      // Search matches the hash or either address, in whatever form the
+      // caller typed it (hex or, for tron, base58) — we don't try to
+      // convert the search term itself, just match it literally against
+      // what's actually stored.
+      where.OR = [
+        { txHash:      { contains: q, mode: 'insensitive' } },
+        { fromAddress: { contains: q, mode: 'insensitive' } },
+        { toAddress:   { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    // Two queries instead of one: the primary one excludes RECEIVE outright
+    // (cheap, index-friendly), then a second only fetches RECEIVE rows
+    // whose txHash has NO matching SEND row at all — the case worth
+    // preserving (see dedupeTxRows). Skipped entirely when filtering to a
+    // specific non-SEND type, since RECEIVE can never satisfy those.
+    const receiveOnlyWhere = { ...where, type: 'RECEIVE' as TxType };
+    const needsReceiveCheck = !type || type === 'SEND';
+
+    const [txRows, receiveRows, bridgeLegs] = await Promise.all([
+      this.prisma.transaction.findMany({ where, orderBy: { createdAt: 'desc' }, take: this.EXPLORER_WINDOW }),
+      needsReceiveCheck
+        ? this.prisma.transaction.findMany({ where: receiveOnlyWhere, orderBy: { createdAt: 'desc' }, take: this.EXPLORER_WINDOW })
+        : Promise.resolve([]),
+      this.fetchBridgeLegs({ token, type, chain, q, dateRange }),
+    ]);
+
+    const knownHashes = new Set(txRows.map(r => r.txHash?.toLowerCase()).filter(Boolean));
+    const orphanReceives = receiveRows.filter(r => !r.txHash || !knownHashes.has(r.txHash.toLowerCase()));
+
+    // Merge + sort on the RAW rows first (cheap, no RPC calls) — only the
+    // page actually being returned gets decorated (which is where the
+    // live fee/block RPC fallback happens), not the whole merged window.
+    const mergedRaw = this.dedupeTxRows([...txRows, ...orphanReceives])
+      .concat(bridgeLegs)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const total = mergedRaw.length;
+    const pageRaw = mergedRaw.slice((page - 1) * limit, (page - 1) * limit + limit);
+    const data = await Promise.all(pageRaw.map(r => this.decorateTx(r)));
+
+    return { data, total, page, limit };
+  }
+
+  async explorerTransaction(txHash: string) {
+    const tx = await this.prisma.transaction.findFirst({
+      where: { txHash: { equals: txHash, mode: 'insensitive' } },
+    });
+    if (tx) return this.decorateTx(tx);
+
+    // Not in Transaction — check whether it's a bridge leg instead.
+    const bridge = await this.prisma.bridgeTransfer.findFirst({
+      where: {
+        OR: [
+          { srcTxHash: { equals: txHash, mode: 'insensitive' } },
+          { dstTxHash: { equals: txHash, mode: 'insensitive' } },
+        ],
+      },
+    });
+    if (bridge) {
+      const isSrc = bridge.srcTxHash?.toLowerCase() === txHash.toLowerCase();
+      return this.decorateTx(isSrc
+        ? { txHash: bridge.srcTxHash, chain: bridge.srcChain, type: 'BRIDGE_LOCK', status: 'CONFIRMED', tokenSymbol: bridge.token, amount: bridge.amount, fromAddress: bridge.srcAddress, toAddress: 'bridge-lock', blockNumber: null, metadata: { bridgeTransferId: bridge.id, dstChain: bridge.dstChain }, createdAt: bridge.createdAt, confirmedAt: bridge.createdAt }
+        : { txHash: bridge.dstTxHash, chain: bridge.dstChain, type: 'BRIDGE_MINT', status: ['COMPLETED','MINTED'].includes(bridge.status) ? 'CONFIRMED' : 'PENDING', tokenSymbol: bridge.token, amount: bridge.amount, fromAddress: 'bridge-mint', toAddress: bridge.dstAddress, blockNumber: null, metadata: { bridgeTransferId: bridge.id, srcChain: bridge.srcChain }, createdAt: bridge.createdAt, confirmedAt: bridge.createdAt },
+      );
+    }
+
+    throw new NotFoundException(`No transaction found for hash ${txHash}`);
+  }
+
+  async explorerAddress(address: string, opts: { page?: number; limit?: number; chain?: string } = {}) {
+    const page  = Math.max(1, opts.page || 1);
+    const limit = Math.min(100, Math.max(1, opts.limit || 25));
+    const chain = opts.chain && opts.chain !== 'all' ? opts.chain : undefined;
+
+    // Whichever form was searched (EVM 0x... or Tron T...), derive its
+    // counterpart on the other chain family — see deriveRelatedAddresses()
+    // for why this is a valid, meaningful lookup for this project's own
+    // addresses. `related` is null if the input doesn't look like either
+    // form (e.g. malformed input) — everything below still works, it just
+    // won't find a counterpart to add.
+    const related = this.deriveRelatedAddresses(address);
+    const evmAddress  = related?.evmAddress  ?? (/^0x[0-9a-fA-F]{40}$/.test(address) ? address : null);
+    const tronAddress = related?.tronAddress ?? (/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(address) ? address : null);
+
+    // The address may have been given to us in whichever form the caller
+    // has it in, in whichever case Tron hex/base58 the DB row happens to
+    // store; also include the derived cross-chain counterpart so a lookup
+    // by either the EVM or the Tron form of the same key surfaces BOTH
+    // chains' transactions in one view, not just the form that was typed.
+    const candidates = new Set([address]);
+    if (evmAddress)  candidates.add(evmAddress);
+    if (tronAddress) candidates.add(tronAddress);
+    if (chain === 'tron' || !chain) candidates.add(this.toDisplayAddress(address, 'tron'));
+    const addrList = Array.from(candidates);
+
+    // Full transaction list for this address, across whichever network(s)
+    // were asked for — reuses the same list/dedupe/bridge-merge path as
+    // explorerTransactions so an address page shows exactly the same
+    // "one row per real event" view.
+    const addrWhere = {
+      OR: [
+        { fromAddress: { in: addrList, mode: 'insensitive' as const } },
+        { toAddress:   { in: addrList, mode: 'insensitive' as const } },
+      ],
+    };
+
+    const txWhereBase: any = { tokenSymbol: 'INRX', ...addrWhere };
+    if (chain) txWhereBase.chain = chain;
+
+    const [allTxRows, bridgeLegsAll] = await Promise.all([
+      this.prisma.transaction.findMany({ where: txWhereBase, orderBy: { createdAt: 'desc' }, take: this.EXPLORER_WINDOW }),
+      this.fetchBridgeLegs({ token: 'INRX', chain }).then(legs =>
+        legs.filter(l => addrList.some(a => a.toLowerCase() === l.fromAddress?.toLowerCase() || a.toLowerCase() === l.toAddress?.toLowerCase()))
+      ),
+    ]);
+
+    // Merge + sort raw rows first (no RPC calls), THEN decorate only the
+    // page actually being returned — see the same note on
+    // explorerTransactions above.
+    const mergedRaw = this.dedupeTxRows(allTxRows)
+      .concat(bridgeLegsAll)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const total = mergedRaw.length;
+    const pageRaw = mergedRaw.slice((page - 1) * limit, (page - 1) * limit + limit);
+    const data = await Promise.all(pageRaw.map(r => this.decorateTx(r)));
+
+    // Balance, PER NETWORK — a live balanceOf(address) read against the
+    // deployed INRX contract on each chain (not a ledger-derived sum of
+    // recorded Transaction rows), so it always matches on-chain truth even
+    // if a row was ever missed. Uses the EVM form of the address for EVM
+    // chains and the Tron form for Tron, regardless of which form was
+    // originally searched — that's the whole point of deriving both above.
+    // A chain whose read fails (RPC down, no counterpart derivable, etc.)
+    // is simply omitted rather than shown as zero, so a real zero balance
+    // and "couldn't check" are never confused.
+    const chainsToCheck = chain ? [chain] : this.EXPLORER_CHAINS.filter(c => c !== 'solana');
+    const liveBalances = await Promise.all(
+      chainsToCheck.map(async c => {
+        const holder = c === 'tron' ? tronAddress : evmAddress;
+        if (!holder) return { chain: c, balance: null as string | null };
+        return { chain: c, balance: await this.liveBalanceOf(c, holder) };
+      }),
+    );
+
+    const balancesByNetwork = liveBalances
+      .filter(b => b.balance != null)
+      .map(b => ({ chain: b.chain, chainLabel: NETWORKS[b.chain]?.label ?? b.chain, balance: Number(b.balance).toFixed(2) }));
+
+    const totalBalance = balancesByNetwork
+      .reduce((s, b) => s + Number(b.balance), 0)
+      .toFixed(2);
+
+    return {
+      address,
+      tokenSymbol: 'INRX',
+      balance: totalBalance,          // kept for backward compatibility with existing frontend field name
+      totalBalance,
+      balancesByNetwork,
+      relatedAddress: related,        // { evmAddress, tronAddress } or null — same key, other chain family
+      txCount: total,
+      data, total, page, limit,
+    };
   }
 }

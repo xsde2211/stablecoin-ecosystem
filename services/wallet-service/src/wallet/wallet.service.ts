@@ -282,12 +282,21 @@ export class WalletService {
         tokenSymbol: dto.token,
         fromAddress: wallet.address,
         toAddress:   dto.chain === 'tron' ? dto.toAddress : dto.toAddress.toLowerCase(),
-        status:      'PENDING',
+        // Both sendEVMToken (via tx.wait()) and sendTRONToken (via
+        // verifyTronTx) only return after the transaction is genuinely
+        // confirmed on-chain — by the time we get here, it already
+        // succeeded. Writing 'PENDING' and relying on listener-service to
+        // eventually flip it to CONFIRMED was the bug: that only happens
+        // once its poller independently rediscovers the same Transfer
+        // event, which is exactly the kind of thing that can be flaky per
+        // chain (matching bsc updating correctly while sepolia didn't).
+        status:      'CONFIRMED',
+        confirmedAt: new Date(),
       },
     });
 
     this.logger.log(`[wallet ${walletIndex}] Token sent: ${txHash} on ${dto.chain}`);
-    return { txHash, status: 'PENDING', walletIndex };
+    return { txHash, status: 'CONFIRMED', walletIndex };
   }
 
   async getTransactions(userId: string, page = 1, limit = 20, walletIndex?: number) {
@@ -300,16 +309,21 @@ export class WalletService {
     });
     const walletIds = wallets.map(w => w.id);
 
+    // SWAP rows (both the burn-out and mint-in legs swap-service writes)
+    // are excluded here — they belong exclusively in Swap History
+    // (GET /swap/history), not mixed into the general activity feed. They
+    // used to show up here as unlabeled entries since TransactionsScreen's
+    // getLabel()/getIcon() have no SWAP case to begin with.
+    const txWhere = { walletId: { in: walletIds }, type: { not: 'SWAP' as const } };
+
     const [data, total] = await Promise.all([
       this.prisma.transaction.findMany({
-        where:   { walletId: { in: walletIds } },
+        where:   txWhere,
         orderBy: { createdAt: 'desc' },
         skip:    (page - 1) * limit,
         take:    limit,
       }),
-      this.prisma.transaction.count({
-        where: { walletId: { in: walletIds } },
-      }),
+      this.prisma.transaction.count({ where: txWhere }),
     ]);
 
     return { data: data.map(serializeTx), total, page, limit };

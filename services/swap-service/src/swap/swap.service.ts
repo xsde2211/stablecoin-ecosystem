@@ -147,17 +147,17 @@ export class SwapService {
     // is fully audited below with everything needed to replay the mint);
     // this is the same tradeoff any burn-then-mint bridge/conversion makes
     // without a two-phase commit across two independent chain calls.
-    const burnTx = await this.burnStablecoin(q.fromToken, q.network, address, q.amount, authHeader);
-    const mintTx = await this.mintStablecoin(q.toToken,   q.network, address, q.toAmount, authHeader);
+    const burn = await this.burnStablecoin(q.fromToken, q.network, address, q.amount, authHeader);
+    const mint = await this.mintStablecoin(q.toToken,   q.network, address, q.toAmount, authHeader);
 
-    await this.recordSwap(userId, q, address, burnTx, mintTx);
+    await this.recordSwap(userId, q, address, burn, mint);
     await this.redis.del(`swap:quote:${quoteId}`);
 
     return {
       status: 'CONFIRMED',
       network: q.network,
-      from: { token: q.fromToken, amount: q.amount,   txHash: burnTx },
-      to:   { token: q.toToken,   amount: q.toAmount, txHash: mintTx },
+      from: { token: q.fromToken, amount: q.amount,   txHash: burn.txHash },
+      to:   { token: q.toToken,   amount: q.toAmount, txHash: mint.txHash },
     };
   }
 
@@ -174,27 +174,27 @@ export class SwapService {
     return address;
   }
 
-  private async burnStablecoin(token: string, network: string, fromAddress: string, amount: string, authHeader: string): Promise<string> {
+  private async burnStablecoin(token: string, network: string, fromAddress: string, amount: string, authHeader: string) {
     const res = await axios.post(
       `${STABLECOIN_SERVICE_URL()}/stablecoin/burn`,
       { token, chain: network, fromAddress, amount, reason: 'swap' },
       { headers: { Authorization: authHeader }, timeout: 120_000 },
     );
-    return res.data.txHash;
+    return res.data; // { txHash, status, blockNumber?, feeAmount?, feeSymbol? }
   }
 
-  private async mintStablecoin(token: string, network: string, toAddress: string, amount: string, authHeader: string): Promise<string> {
+  private async mintStablecoin(token: string, network: string, toAddress: string, amount: string, authHeader: string) {
     const res = await axios.post(
       `${STABLECOIN_SERVICE_URL()}/stablecoin/mint`,
       { token, chain: network, toAddress, amount, reason: 'swap' },
       { headers: { Authorization: authHeader }, timeout: 120_000 },
     );
-    return res.data.txHash;
+    return res.data; // { txHash, status, blockNumber?, feeAmount?, feeSymbol? }
   }
 
   // ─── Recording — same shared Wallet/Transaction model every service uses ──
 
-  private async recordSwap(userId: string, q: StoredQuote, address: string, burnTx: string, mintTx: string) {
+  private async recordSwap(userId: string, q: StoredQuote, address: string, burn: any, mint: any) {
     const wallet = await this.prisma.wallet.findFirst({
       where: { userId, chain: q.network, walletIndex: q.walletIndex },
     });
@@ -219,34 +219,42 @@ export class SwapService {
       amount: q.amount, tokenSymbol: q.fromToken,
       fromAddress: address, toAddress: 'swap-conversion', status: 'CONFIRMED' as const,
       confirmedAt: new Date(),
-      metadata: { ...baseMetadata, direction: 'OUT', counterpart: { token: q.toToken, amount: q.toAmount } },
+      ...(burn.blockNumber != null ? { blockNumber: BigInt(burn.blockNumber) } : {}),
+      metadata: {
+        ...baseMetadata, direction: 'OUT', counterpart: { token: q.toToken, amount: q.toAmount },
+        ...(burn.feeAmount != null ? { feeAmount: burn.feeAmount, feeSymbol: burn.feeSymbol } : {}),
+      },
     };
     const mintData = {
       chain: q.network, type: 'SWAP' as const,
       amount: q.toAmount, tokenSymbol: q.toToken,
       fromAddress: 'swap-conversion', toAddress: address, status: 'CONFIRMED' as const,
       confirmedAt: new Date(),
-      metadata: { ...baseMetadata, direction: 'IN', counterpart: { token: q.fromToken, amount: q.amount } },
+      ...(mint.blockNumber != null ? { blockNumber: BigInt(mint.blockNumber) } : {}),
+      metadata: {
+        ...baseMetadata, direction: 'IN', counterpart: { token: q.fromToken, amount: q.amount },
+        ...(mint.feeAmount != null ? { feeAmount: mint.feeAmount, feeSymbol: mint.feeSymbol } : {}),
+      },
     };
 
     await Promise.all([
       this.prisma.transaction.upsert({
-        where:  { walletId_txHash: { walletId: wallet.id, txHash: burnTx } },
-        create: { walletId: wallet.id, txHash: burnTx, ...burnData },
+        where:  { walletId_txHash: { walletId: wallet.id, txHash: burn.txHash } },
+        create: { walletId: wallet.id, txHash: burn.txHash, ...burnData },
         update: burnData,
       }),
       this.prisma.transaction.upsert({
-        where:  { walletId_txHash: { walletId: wallet.id, txHash: mintTx } },
-        create: { walletId: wallet.id, txHash: mintTx, ...mintData },
+        where:  { walletId_txHash: { walletId: wallet.id, txHash: mint.txHash } },
+        create: { walletId: wallet.id, txHash: mint.txHash, ...mintData },
         update: mintData,
       }),
       this.prisma.auditLog.create({
         data: {
-          userId, action: 'SWAP', entityType: 'Swap', entityId: burnTx,
+          userId, action: 'SWAP', entityType: 'Swap', entityId: burn.txHash,
           payload: {
             network: q.network,
-            from: { token: q.fromToken, amount: q.amount, txHash: burnTx },
-            to:   { token: q.toToken,   amount: q.toAmount, txHash: mintTx },
+            from: { token: q.fromToken, amount: q.amount, txHash: burn.txHash },
+            to:   { token: q.toToken,   amount: q.toAmount, txHash: mint.txHash },
             feeBps: q.feeBps, feeUsd: q.feeUsd,
           },
         },
@@ -256,8 +264,11 @@ export class SwapService {
 
   // ─── History ─────────────────────────────────────────────────────────────
 
-  async getHistory(userId: string, page = 1, limit = 20) {
-    const wallets   = await this.prisma.wallet.findMany({ where: { userId }, select: { id: true } });
+  async getHistory(userId: string, page = 1, limit = 20, walletIndex?: number) {
+    const walletWhere: any = { userId };
+    if (walletIndex !== undefined) walletWhere.walletIndex = walletIndex;
+
+    const wallets   = await this.prisma.wallet.findMany({ where: walletWhere, select: { id: true } });
     const walletIds = wallets.map(w => w.id);
 
     const [data, total] = await Promise.all([

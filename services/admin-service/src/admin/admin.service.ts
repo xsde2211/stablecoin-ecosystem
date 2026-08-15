@@ -40,6 +40,45 @@ const ACCESS_CONTROL_ABI = [
   'function hasRole(bytes32 role, address account) view returns (bool)',
 ];
 
+// TronWeb's contract() typings require the structured JSON ABI fragment
+// format (what solc/TronBox actually output), not ethers' "human-readable"
+// string format above — ACCESS_CONTROL_ABI works fine for ethers.Contract
+// but fails TronWeb's ContractAbiInterface type check with "string is not
+// assignable to AbiFragment". Same three functions, just written the way
+// TronWeb expects them.
+const ACCESS_CONTROL_ABI_TRON = [
+  {
+    inputs: [
+      { internalType: 'bytes32', name: 'role',    type: 'bytes32' },
+      { internalType: 'address', name: 'account', type: 'address' },
+    ],
+    name: 'grantRole',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'bytes32', name: 'role',    type: 'bytes32' },
+      { internalType: 'address', name: 'account', type: 'address' },
+    ],
+    name: 'revokeRole',
+    outputs: [],
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'bytes32', name: 'role',    type: 'bytes32' },
+      { internalType: 'address', name: 'account', type: 'address' },
+    ],
+    name: 'hasRole',
+    outputs: [{ internalType: 'bool', name: '', type: 'bool' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+] as const;
+
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
@@ -368,7 +407,7 @@ export class AdminService {
     return new ethers.Wallet(deployerKey, provider);
   }
 
-  private getTronContract(contractAddress: string) {
+private getTronContract(contractAddress: string) {
     const deployerKey = process.env.DEPLOYER_TRON_PRIVATE_KEY;
     if (!deployerKey) throw new Error('DEPLOYER_TRON_PRIVATE_KEY not configured — cannot administer on-chain roles on TRON');
 
@@ -377,7 +416,14 @@ export class AdminService {
       privateKey: deployerKey,
       headers:    { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
     });
-    return tronWeb.contract().at(contractAddress);
+    // .contract().at(address) makes TronWeb fetch the ABI from the chain,
+    // which only works for a contract that's verified on TronScan (or
+    // otherwise indexed) — ours aren't verified yet, so that lookup
+    // silently returns a contract object with NO methods attached, and
+    // every call then fails with "<method> is not a function". Passing
+    // the ABI directly (same ACCESS_CONTROL_ABI already used for the EVM
+    // chains below) sidesteps the on-chain ABI lookup entirely.
+    return tronWeb.contract(ACCESS_CONTROL_ABI_TRON, contractAddress);
   }
 
   private assertValidRole(contractKey: string, roleName: string) {
@@ -466,7 +512,7 @@ export class AdminService {
         privateKey: deployerKey,
         headers:    { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
       });
-      const contract = await tronWeb.contract().at(contractAddress);
+      const contract = await tronWeb.contract(ACCESS_CONTROL_ABI_TRON, contractAddress);
       const hasRole = await contract.hasRole(roleHash, targetAddress).call();
       return { chain, contract: contractKey, role: roleName, target: targetAddress, hasRole };
     }

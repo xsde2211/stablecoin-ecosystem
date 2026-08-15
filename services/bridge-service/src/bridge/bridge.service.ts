@@ -31,6 +31,65 @@ const BRIDGE_V2_ABI = [
   'event TokensUnlocked(bytes32 indexed tokenId, address indexed to, uint256 amount, uint256 dstChainId, bytes32 nonceKey)',
 ];
 
+export const TRON_BRIDGE_ABI = [
+  {
+    inputs: [
+      { internalType: 'string',  name: 'token',        type: 'string' },
+      { internalType: 'uint256', name: 'amount',       type: 'uint256' },
+      { internalType: 'string',  name: 'dstChain',     type: 'string' },
+      { internalType: 'address', name: 'dstRecipient', type: 'address' },
+      { internalType: 'uint256', name: 'nonce',        type: 'uint256' },
+      { internalType: 'uint256', name: 'deadline',     type: 'uint256' },
+    ],
+    name: 'lock', outputs: [], stateMutability: 'nonpayable', type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'string',  name: 'token',        type: 'string' },
+      { internalType: 'uint256', name: 'amount',       type: 'uint256' },
+      { internalType: 'string',  name: 'srcChain',     type: 'string' },
+      { internalType: 'address', name: 'srcRecipient', type: 'address' },
+      { internalType: 'uint256', name: 'nonce',        type: 'uint256' },
+      { internalType: 'uint256', name: 'deadline',     type: 'uint256' },
+    ],
+    name: 'burn', outputs: [], stateMutability: 'nonpayable', type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'string',   name: 'token',      type: 'string' },
+      { internalType: 'address',  name: 'recipient',  type: 'address' },
+      { internalType: 'uint256',  name: 'amount',     type: 'uint256' },
+      { internalType: 'string',   name: 'srcChain',   type: 'string' },
+      { internalType: 'bytes32',  name: 'srcNonce',   type: 'bytes32' },
+      { internalType: 'bytes[]',  name: 'signatures', type: 'bytes[]' },
+    ],
+    name: 'mintTokens', outputs: [], stateMutability: 'nonpayable', type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'string',   name: 'token',      type: 'string' },
+      { internalType: 'address',  name: 'recipient',  type: 'address' },
+      { internalType: 'uint256',  name: 'amount',     type: 'uint256' },
+      { internalType: 'string',   name: 'srcChain',   type: 'string' },
+      { internalType: 'bytes32',  name: 'srcNonce',   type: 'bytes32' },
+      { internalType: 'bytes[]',  name: 'signatures', type: 'bytes[]' },
+    ],
+    name: 'unlock', outputs: [], stateMutability: 'nonpayable', type: 'function',
+  },
+  {
+    inputs: [
+      { internalType: 'string',  name: 'symbol',       type: 'string' },
+      { internalType: 'address', name: 'contractAddr', type: 'address' },
+    ],
+    name: 'registerToken', outputs: [], stateMutability: 'nonpayable', type: 'function',
+  },
+  {
+    inputs: [], name: 'paused',
+    outputs: [{ internalType: 'bool', name: '', type: 'bool' }],
+    stateMutability: 'view', type: 'function',
+  },
+];
+
 @Injectable()
 export class BridgeService {
   private readonly logger = new Logger(BridgeService.name);
@@ -40,7 +99,7 @@ export class BridgeService {
     ethereum: 11155111n, // Sepolia testnet
     bsc:      97n,       // BSC testnet
     polygon:  80002n,    // Polygon Amoy testnet
-    tron:     728126428n,
+    tron:     3448148188n,
   };
 
   // Token IDs (keccak256 of token symbol — must match contract)
@@ -465,7 +524,7 @@ export class BridgeService {
     // callers get a Promise<ContractInstance> instead of the actual
     // contract, and calling .mintTokens()/.unlock() on a Promise doesn't
     // typecheck (or work at runtime).
-    const bridge = await tronWeb.contract().at(process.env.TRON_BRIDGE_V2_ADDRESS!);
+    const bridge = await tronWeb.contract(TRON_BRIDGE_ABI, process.env.TRON_BRIDGE_V2_ADDRESS!);
     return { tronWeb, bridge };
   }
 

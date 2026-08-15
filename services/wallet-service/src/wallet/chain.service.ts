@@ -9,9 +9,9 @@ const ERC20_ABI = [
 ];
 
 const TRC20_ABI = [
-  { constant:true, inputs:[{name:'_owner',type:'address'}], name:'balanceOf',
+  { constant:true,  stateMutability:'view',       inputs:[{name:'_owner',type:'address'}], name:'balanceOf',
     outputs:[{name:'balance',type:'uint256'}], type:'function' },
-  { constant:false, inputs:[{name:'_to',type:'address'},{name:'_value',type:'uint256'}],
+  { constant:false, stateMutability:'nonpayable', inputs:[{name:'_to',type:'address'},{name:'_value',type:'uint256'}],
     name:'transfer', outputs:[{name:'',type:'bool'}], type:'function' },
 ];
 
@@ -41,7 +41,6 @@ export class ChainService {
   // each fire their own full round of RPC calls for the same data.
   private readonly balanceCache = new Map<string, { value: string; expiresAt: number }>();
   private readonly CACHE_TTL_MS = 8_000;
-
   constructor() {
     // staticNetwork:true skips ethers' auto-detect handshake (a fresh eth_chainId
     // call) — without it, if that single handshake at startup fails or gets
@@ -150,7 +149,7 @@ export class ChainService {
     tronWeb.setAddress(address);
     const contract = await tronWeb.contract(TRC20_ABI, tokenAddress);
     const balance  = await contract.balanceOf(address).call();
-    return (BigInt(balance.toString()) / 1_000_000n).toString();
+    return ethers.formatUnits(balance.toString(), TOKEN_DECIMALS);
   }
 
   private async getSolanaBalance(walletAddress: string, mintAddress: string): Promise<string> {
@@ -209,14 +208,43 @@ export class ChainService {
       headers:    { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
     });
 
-    const contract    = await tronWeb.contract().at(tokenAddress);
+    // Was tronWeb.contract().at(tokenAddress) — fetches the ABI from the
+    // chain, which only works reliably for a verified contract, and even
+    // then depends on TronScan's indexer being up. Passing TRC20_ABI
+    // directly (same one getTRONBalance already uses, just below) sidesteps
+    // that entirely — this is the exact same bug we've now hit and fixed in
+    // admin-service, bridge-service, and stablecoin-service, just never
+    // caught here since regular sends hadn't been tested since it appeared.
+    const contract    = await tronWeb.contract(TRC20_ABI, tokenAddress);
     const amountMicro = BigInt(Math.round(parseFloat(amount) * 1_000_000)).toString();
 
     const txId = await contract.transfer(toAddress, amountMicro).send({
       feeLimit: 100_000_000,
     });
 
+    // .send() only confirms the transaction was BROADCAST, not that it
+    // succeeded on-chain — same TronWeb gotcha fixed in bridge.service.ts
+    // and upgrade-token.js. Without this, a reverted send would still
+    // return a txHash and get recorded as if it worked.
+    await this.verifyTronTx(tronWeb, txId);
+
     return txId;
+  }
+
+  // Polls until the transaction's receipt is available and throws if it
+  // reverted. Tron's gettransactioninfobyid often only returns data once
+  // the tx is solidified, which can take well past a few seconds under any
+  // network load — same reasoning as bridge.service.ts's verifyTronTx.
+  private async verifyTronTx(tronWeb: TronWeb, txId: string, attempts = 20, delayMs = 5000): Promise<void> {
+    for (let i = 0; i < attempts; i++) {
+      const info = await tronWeb.trx.getTransactionInfo(txId);
+      if (info && info.receipt && info.receipt.result) {
+        if (info.receipt.result === 'SUCCESS') return;
+        throw new Error(`TRON transaction ${txId} reverted on-chain: ${info.receipt.result}`);
+      }
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+    throw new Error(`TRON transaction ${txId} not confirmed after ${(attempts * delayMs) / 1000}s`);
   }
 
   // ─── Address derivation helpers ──────────────────────────────────────────────
