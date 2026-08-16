@@ -6,7 +6,7 @@
 # Build context MUST be the repo root (where pnpm-workspace.yaml lives),
 # not this docker/ folder — see the `context: .` in docker-compose.yml.
 
-FROM node:20-slim AS build
+FROM node:22-slim AS build
 ARG SERVICE_NAME
 RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
 WORKDIR /app
@@ -27,7 +27,7 @@ RUN pnpm exec prisma generate --schema=packages/config/prisma/schema.prisma
 RUN pnpm --filter "${SERVICE_NAME}" run build
 
 # ── Runtime stage ────────────────────────────────────────────────────────
-FROM node:20-slim
+FROM node:22-slim
 ARG SERVICE_NAME
 ENV SERVICE_NAME=${SERVICE_NAME}
 RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
