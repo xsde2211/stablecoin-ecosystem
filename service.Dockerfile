@@ -8,7 +8,7 @@
 
 FROM node:20-slim AS build
 ARG SERVICE_NAME
-RUN corepack enable && corepack prepare pnpm@9 --activate
+RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
 WORKDIR /app
 
 # Copy workspace manifests first for better layer caching across services —
@@ -30,7 +30,7 @@ RUN pnpm --filter "${SERVICE_NAME}" run build
 FROM node:20-slim
 ARG SERVICE_NAME
 ENV SERVICE_NAME=${SERVICE_NAME}
-RUN corepack enable && corepack prepare pnpm@9 --activate
+RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
 WORKDIR /app
 
 COPY --from=build /app /app
