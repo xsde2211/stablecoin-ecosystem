@@ -24,7 +24,7 @@ RUN pnpm install --frozen-lockfile
 # resolves @prisma/client through pnpm's hoisted node_modules.
 RUN pnpm exec prisma generate --schema=packages/config/prisma/schema.prisma
 
-RUN pnpm --filter "${SERVICE_NAME}" run build
+RUN pnpm --filter "${SERVICE_NAME}..." run build
 
 # ── Runtime stage ────────────────────────────────────────────────────────
 FROM node:22-slim
