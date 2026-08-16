@@ -14,7 +14,7 @@ x-service-defaults: &service-defaults
 
 x-build-defaults: &build-context
   context: .
-  dockerfile: docker/service.Dockerfile
+  dockerfile: service.Dockerfile
 
 networks:
   backend:
