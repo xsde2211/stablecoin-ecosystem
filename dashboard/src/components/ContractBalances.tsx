@@ -3,6 +3,7 @@ import { ChainConfig } from '../lib/constants';
 import { ChainHolderData, TokenHolderData } from '../lib/chainReader';
 import { formatToken, shortAddress, formatCompactAge } from '../lib/format';
 import { LiveDot } from './LiveDot';
+import { CopyableAddress } from './CopyableAddress';
 
 const TOKENS: { key: keyof ChainHolderData; label: string; accent: string }[] = [
   { key: 'INRX', label: 'INRX', accent: '#E08D3C' },
@@ -56,7 +57,11 @@ export function ContractBalances({
                   <span className="h-2 w-2 rounded-full" style={{ backgroundColor: row.accent }} />
                   <div>
                     <div className="text-sm text-ivory">{row.label}</div>
-                    <div className="text-[11px] text-muted font-mono">{shortAddress(chain.tokens[row.key])}</div>
+                    <CopyableAddress
+                      address={chain.tokens[row.key]}
+                      display={shortAddress(chain.tokens[row.key])}
+                      className="text-[11px] text-muted"
+                    />
                   </div>
                 </div>
                 <div className="text-right">
@@ -109,7 +114,7 @@ function HolderDetailOverlay({
             ×
           </button>
         </div>
-        <p className="text-xs text-muted mb-4 font-mono">{chain.tokens[token.key]}</p>
+        <CopyableAddress address={chain.tokens[token.key]} className="text-xs text-muted mb-4 block" />
 
         <div className="flex items-center justify-between mb-3 pb-3 border-b border-hairline">
           <span className="text-xs text-muted">{data.holderCount} holder{data.holderCount === 1 ? '' : 's'}</span>
@@ -124,7 +129,11 @@ function HolderDetailOverlay({
           {data.holders.map((holder, i) => (
             <div key={holder.address} className="flex items-center justify-between text-xs">
               <span className="text-muted w-5">{i + 1}.</span>
-              <span className="font-mono text-muted flex-1 mx-2">{shortAddress(holder.address)}</span>
+              <CopyableAddress
+                address={holder.address}
+                display={shortAddress(holder.address)}
+                className="text-muted flex-1 mx-2"
+              />
               <span className="tnum font-mono text-ivory">{formatToken(holder.balance, token.label)}</span>
             </div>
           ))}

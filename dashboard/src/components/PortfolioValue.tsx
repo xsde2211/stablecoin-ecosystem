@@ -7,60 +7,38 @@ export function PortfolioValue({
 }: { balances: TokenBalances | null; prices: MarketPrices | null }) {
   const ready = balances && prices;
 
-  const inrxValueInr = ready ? balances!.INRX * 1 : 0;
-  const goldValueInr = ready ? balances!.EGOLD * prices!.goldInrPerGram : 0;
-  const silverValueInr = ready ? balances!.ESLVR * prices!.silverInrPerGram : 0;
-  const totalInr = inrxValueInr + goldValueInr + silverValueInr;
-  const totalUsd = ready ? totalInr / prices!.usdInr : 0;
-
-  const segments = ready && totalInr > 0
+  // Each token's own value, shown independently — NOT summed into a
+  // combined "total portfolio value". Array-driven on purpose: adding a
+  // 4th (or 5th) reserve token later is one more entry here, nothing else
+  // to restructure.
+  const rows = ready
     ? [
-        { label: 'INRX', value: inrxValueInr, color: '#E08D3C' },
-        { label: 'EGold', value: goldValueInr, color: '#C9A24B' },
-        { label: 'ESilver', value: silverValueInr, color: '#B8C0C8' },
+        { label: 'INRX', valueInr: balances!.INRX * 1, color: '#E08D3C' },
+        { label: 'EGold', valueInr: balances!.EGOLD * prices!.goldInrPerGram, color: '#C9A24B' },
+        { label: 'ESilver', valueInr: balances!.ESLVR * prices!.silverInrPerGram, color: '#B8C0C8' },
       ]
     : [];
 
   return (
     <section className="rounded-2xl border border-gold/30 bg-gradient-to-br from-panel to-panel2 p-6 shadow-panel">
-      <h2 className="font-display text-lg text-ivory mb-1">Total contract portfolio value</h2>
-      <p className="text-xs text-muted mb-5">Sum of all reserve token balances held by the deployed contracts on this network</p>
+      <h2 className="font-display text-lg text-ivory mb-1">Contract value by token</h2>
+      <p className="text-xs text-muted mb-5">Value of each reserve token balance held by the deployed contracts on this network — shown independently, not summed</p>
 
       {!ready ? (
         <div className="text-sm text-muted">Waiting for balances and live prices…</div>
       ) : (
-        <>
-          <div className="flex items-baseline gap-3 mb-5">
-            <span className="tnum font-mono text-4xl font-medium text-gold">{formatInr(totalInr)}</span>
-            <span className="tnum font-mono text-lg text-muted">{formatUsd(totalUsd)}</span>
-          </div>
-
-          {/* Signature element: reserve composition — a proportional bar
-              built from each asset's real, live contribution to total
-              value, not a decorative chart. */}
-          <div className="h-2.5 w-full rounded-full overflow-hidden flex bg-panel2 border border-hairline">
-            {segments.map((seg) => (
-              <div
-                key={seg.label}
-                style={{ width: `${(seg.value / totalInr) * 100}%`, backgroundColor: seg.color }}
-                title={`${seg.label}: ${formatInr(seg.value)}`}
-              />
-            ))}
-          </div>
-
-          <div className="flex flex-wrap gap-x-6 gap-y-2 mt-3.5">
-            {segments.map((seg) => (
-              <div key={seg.label} className="flex items-center gap-2 text-xs">
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: seg.color }} />
-                <span className="text-muted">{seg.label}</span>
-                <span className="tnum font-mono text-ivory">{formatInr(seg.value)}</span>
-                <span className="tnum font-mono text-muted">
-                  {totalInr > 0 ? `${((seg.value / totalInr) * 100).toFixed(1)}%` : '—'}
-                </span>
+        <div className="grid gap-3 sm:grid-cols-3">
+          {rows.map((row) => (
+            <div key={row.label} className="rounded-xl border border-hairline bg-panel2/60 p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: row.color }} />
+                <span className="text-xs text-muted">{row.label}</span>
               </div>
-            ))}
-          </div>
-        </>
+              <div className="tnum font-mono text-2xl font-medium text-gold leading-tight">{formatInr(row.valueInr)}</div>
+              <div className="tnum font-mono text-xs text-muted mt-0.5">{formatUsd(row.valueInr / prices!.usdInr)}</div>
+            </div>
+          ))}
+        </div>
       )}
     </section>
   );
