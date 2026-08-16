@@ -710,82 +710,86 @@ HOW ABOVE FUNCTION WORKS IN ORDER:
   }
 
   // ─── Polling fallback — TRON (no native WSS event subscriptions) ──────────────
-
-  @Cron('*/30 * * * * *') // every 30 seconds
+private lastTronAccountTs: Record<string, number> = {};
+@Cron('*/30 * * * * *') // every 30 seconds
   async pollTronTokenTransfers() {
+    // Switched from /v1/contracts/:address/events to this account-scoped
+    // endpoint entirely — the contract-events endpoint decodes `result`
+    // using the ABI registered AT THAT ADDRESS, and our tokens are proxies:
+    // the proxy's own verified ABI (EcosystemProxy.sol) has no Transfer
+    // event declared at all, only AdminChanged/BeaconUpgraded/Upgraded, so
+    // TronGrid could identify the event by name but never decode its
+    // parameters (hence the empty `result: {}`). This endpoint is a
+    // purpose-built TRC20-transfer index, not generic ABI-based event
+    // decoding, so it isn't affected by that at all — same reason
+    // Etherscan's "Token Transfers" tab works fine for proxy tokens even
+    // when its generic "Events" tab can't decode them.
+    const wallets = await this.prisma.wallet.findMany({
+      where:  { chain: 'tron', isActive: true },
+      select: { address: true },
+    });
+    if (!wallets.length) return;
+
     const TOKENS = ['INRX', 'EGOLD', 'ESLVR'] as const;
 
-    for (const symbol of TOKENS) {
-      const tokenAddr = this.getTokenAddress('tron', symbol);
-      if (!tokenAddr) continue;
+    for (const { address: walletAddr } of wallets) {
+      for (const symbol of TOKENS) {
+        const tokenAddr = this.getTokenAddress('tron', symbol);
+        if (!tokenAddr) continue;
+        const tokenAddrBase58 = this.normalizeTronAddress(tokenAddr);
 
-      // Anchored to the last event actually processed for this token, not
-      // wall-clock time or a fixed page size. TronGrid's events endpoint
-      // defaults to order_by=block_timestamp,desc with limit=20 — with
-      // only_confirmed=true, an event needs time to solidify before it
-      // even appears, and if 20+ *other* transfers land on the same
-      // contract in that window (easy on a heavily-tested token), the
-      // still-unconfirmed one falls out of "most recent 20" and is never
-      // seen again. Walking forward from the last processed event
-      // (order_by=asc + min_timestamp) instead means a slow-to-confirm
-      // event just shows up on a later poll — nothing can silently drop.
-      const tokenAddrBase58 = this.normalizeTronAddress(tokenAddr);
-
-      if (this.lastTronEventTs[symbol] === undefined) {
-        this.lastTronEventTs[symbol] = Date.now() - 10 * 60 * 1000;
-      }
-
-      try {
-        const url = `${process.env.TRON_RPC}/v1/contracts/${tokenAddrBase58}/events`;
-        const res = await axios.get(url, {
-          params: {
-            event_name:         'Transfer',
-            only_confirmed:     true,
-            min_block_timestamp: this.lastTronEventTs[symbol], // was min_timestamp — not a
-                                                                 // real TronGrid param, so it
-                                                                 // was silently ignored every
-                                                                 // single poll, which is why
-                                                                 // the same tx kept reappearing
-            order_by:            'block_timestamp,asc',
-            limit:                200,
-          },
-          headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
-          timeout: 10000,
-        });
-
-        for (const evt of res.data?.data ?? []) {
-          // Defensive: TronGrid names event params after whatever the
-          // verified ABI declares. Our OZ-based ERC20 uses Transfer(from,
-          // to, value) — but if ABI resolution ever falls back to a
-          // generic TRC20 template, the community-standard interface
-          // names them _from/_to/_value (underscore-prefixed) instead.
-          // Handling both (plus positional array as a last resort) means
-          // this doesn't silently break again if that fallback ever
-          // kicks in — which is exactly what happened here (result.from/
-          // .to/.value were all empty, meaning neither key was present as
-          // the code assumed).
-          const r = evt.result ?? {};
-          const rawFrom  = r.from  ?? r._from  ?? (Array.isArray(r) ? r[0] : undefined);
-          const rawTo    = r.to    ?? r._to    ?? (Array.isArray(r) ? r[1] : undefined);
-          const rawValue = r.value ?? r._value ?? (Array.isArray(r) ? r[2] : undefined);
-
-          if (!rawFrom || !rawTo) {
-            this.logger.warn(`[tron] ${symbol} Transfer ${evt.transaction_id}: could not extract from/to — raw result: ${JSON.stringify(evt.result)}`);
-            continue;
-          }
-
-          const from  = this.normalizeTronAddress(rawFrom);
-          const to    = this.normalizeTronAddress(rawTo);
-          const value = BigInt(rawValue ?? '0');
-          this.logger.log(`[tron] ${symbol} Transfer ${evt.transaction_id}: ${from} → ${to} (${value})`);
-          await this.handleTokenTransfer('tron', symbol, from, to, value, evt.transaction_id, evt.block ?? 0);
-
-          if (evt.block_timestamp && evt.block_timestamp >= this.lastTronEventTs[symbol]) {
-            this.lastTronEventTs[symbol] = evt.block_timestamp + 1;
-          }
+        const cacheKey = `${walletAddr}:${symbol}`;
+        if (this.lastTronAccountTs[cacheKey] === undefined) {
+          this.lastTronAccountTs[cacheKey] = Date.now() - 10 * 60 * 1000; // 10 min cold-start window
         }
-      } catch (err: any) {
-        this.logger.warn(`[tron] ${symbol} poll failed: ${err.response?.status ?? ''} ${err.response?.data ? JSON.stringify(err.response.data).slice(0, 300) : err.message}`);
+
+        try {
+          const url = `${process.env.TRON_RPC}/v1/accounts/${walletAddr}/transactions/trc20`;
+          const res = await axios.get(url, {
+            params: {
+              only_confirmed:   true,
+              contract_address: tokenAddrBase58,
+              min_timestamp:    this.lastTronAccountTs[cacheKey],
+              order_by:         'block_timestamp,asc',
+              limit:            200,
+            },
+            headers: { 'TRON-PRO-API-KEY': process.env.TRON_API_KEY ?? '' },
+            timeout: 10000,
+          });
+
+          for (const t of res.data?.data ?? []) {
+            const rawFrom  = t.from;
+            const rawTo    = t.to;
+            const rawValue = t.value;
+
+            if (!rawFrom || !rawTo) {
+              this.logger.warn(`[tron] ${symbol}@${walletAddr} transfer ${t.transaction_id}: unexpected shape — raw: ${JSON.stringify(t)}`);
+              continue;
+            }
+
+            const from = this.normalizeTronAddress(rawFrom);
+            const to   = this.normalizeTronAddress(rawTo);
+
+            // This wallet can appear as sender or recipient — the SEND
+            // side is already recorded directly by wallet.service.ts the
+            // moment it broadcasts, so only the RECEIVE side is this
+            // poller's job. Processing the sender's own outgoing row again
+            // here would just be a harmless no-op (handleTokenTransfer's
+            // upsert wouldn't clobber the existing SEND-typed row's type),
+            // but skipping it avoids the redundant work and log noise.
+            if (to !== walletAddr) continue;
+
+            const value = BigInt(rawValue ?? '0');
+            this.logger.log(`[tron] ${symbol} TRC20 transfer ${t.transaction_id}: ${from} → ${to} (${value})`);
+            await this.handleTokenTransfer('tron', symbol, from, to, value, t.transaction_id, 0);
+
+            if (t.block_timestamp && t.block_timestamp >= this.lastTronAccountTs[cacheKey]) {
+              this.lastTronAccountTs[cacheKey] = t.block_timestamp + 1;
+            }
+          }
+        } catch (err: any) {
+          this.logger.warn(`[tron] ${symbol}@${walletAddr} poll failed: ${err.response?.status ?? ''} ${err.response?.data ? JSON.stringify(err.response.data).slice(0, 300) : err.message}`);
+        }
       }
     }
   }

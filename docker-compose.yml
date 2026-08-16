@@ -1,121 +1,200 @@
+version: "3.9"
+
+# ── Shared config, reused via YAML anchors so 15 near-identical service
+# blocks below don't each repeat the same restart/network/env_file lines ──
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  networks: [backend]
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+x-build-defaults: &build-context
+  context: .
+  dockerfile: docker/service.Dockerfile
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  grafana_data:
+
 services:
-
-  # ── Infrastructure ───────────────────────────────────────────────
-
+  # ── Shared infrastructure ──────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
-    container_name: stablecoin-postgres
     restart: unless-stopped
+    networks: [backend]
     environment:
-      POSTGRES_DB:       stablecoin
-      POSTGRES_USER:     admin
+      POSTGRES_USER: ${POSTGRES_USER:-stablecoin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-stablecoin}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5433:5432"
+      - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test:     ["CMD-SHELL", "pg_isready -U admin -d stablecoin"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stablecoin}"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
+    # NOT exposed to the host or the internet — only reachable by other
+    # containers on the `backend` network, by Docker's own internal DNS.
 
   redis:
     image: redis:7-alpine
-    container_name: stablecoin-redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    networks: [backend]
+    command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
     healthcheck:
-      test:     ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
-      timeout:  5s
-      retries:  5
+      timeout: 5s
+      retries: 5
 
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
-    container_name: stablecoin-zookeeper
-    restart: unless-stopped
+  # ── Gateway — the ONLY service reachable from outside this VM ──────────
+  gateway:
+    <<: *service-defaults
+    build:
+      <<: *build-context
+      args:
+        SERVICE_NAME: gateway
     environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME:   2000
-    volumes:
-      - zookeeper_data:/var/lib/zookeeper/data
-
-  kafka:
-    image: confluentinc/cp-kafka:7.6.0
-    container_name: stablecoin-kafka
-    restart: unless-stopped
-    depends_on:
-      - zookeeper
-    environment:
-      KAFKA_BROKER_ID:                        1
-      KAFKA_ZOOKEEPER_CONNECT:                zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS:             PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP:   PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME:       PLAINTEXT_INTERNAL
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE:        "true"
-    volumes:
-      - kafka_data:/var/lib/kafka/data
+      PORT: "3001"
+      # Every *_SERVICE_URL uses the Compose service name, not localhost —
+      # under separate containers (unlike a single-container deploy), each
+      # service lives on its own network hostname reachable via Docker's
+      # built-in DNS. This is the one thing that's genuinely different from
+      # every other deployment approach we've discussed for this project.
+      AUTH_SERVICE_URL: http://auth-service:3002
+      WALLET_SERVICE_URL: http://wallet-service:3003
+      BRIDGE_SERVICE_URL: http://bridge-service:3004
+      STABLECOIN_SERVICE_URL: http://stablecoin-service:3005
+      TREASURY_SERVICE_URL: http://treasury-service:3006
+      RESERVE_SERVICE_URL: http://reserve-service:3007
+      PAYMENT_SERVICE_URL: http://payment-service:3008
+      MERCHANT_SERVICE_URL: http://merchant-service:3009
+      KYC_SERVICE_URL: http://kyc-service:3010
+      NOTIFICATION_SERVICE_URL: http://notification-service:3011
+      ANALYTICS_SERVICE_URL: http://analytics-service:3012
+      FRAUD_SERVICE_URL: http://fraud-service:3013
+      LISTENER_SERVICE_URL: http://listener-service:3014
+      ADMIN_SERVICE_URL: http://admin-service:3015
+      SWAP_SERVICE_URL: http://swap-service:3016
     ports:
-      - "9092:9092"
-    healthcheck:
-      test:     ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
-      interval: 30s
-      timeout:  10s
-      retries:  5
+      # Bound to loopback ONLY — nginx (running on the host, not in
+      # Compose) reverse-proxies 443 → this. Nothing external can reach
+      # port 3001 directly, even though it's "published".
+      - "127.0.0.1:3001:3001"
 
-  # ── Optional: Database GUI (remove in production) ─────────────────
+  auth-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: auth-service } }
+    environment: { PORT: "3002" }
 
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: stablecoin-pgadmin
-    restart: unless-stopped
+  wallet-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: wallet-service } }
     environment:
-      PGADMIN_DEFAULT_EMAIL:    admin@admin.com
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
-    ports:
-      - "5050:80"
-    depends_on:
-      - postgres
+      PORT: "3003"
+      # wallet-service calls stablecoin-service directly (not through the
+      # gateway) for live token prices — same reasoning as above, needs the
+      # Compose service name, not localhost.
+      STABLECOIN_SERVICE_URL: http://stablecoin-service:3005
 
-  # ── Monitoring ────────────────────────────────────────────────────
+  bridge-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: bridge-service } }
+    environment: { PORT: "3004" }
 
+  stablecoin-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: stablecoin-service } }
+    environment: { PORT: "3005" }
+
+  treasury-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: treasury-service } }
+    environment: { PORT: "3006" }
+
+  reserve-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: reserve-service } }
+    environment: { PORT: "3007" }
+
+  payment-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: payment-service } }
+    environment: { PORT: "3008" }
+
+  merchant-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: merchant-service } }
+    environment: { PORT: "3009" }
+
+  kyc-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: kyc-service } }
+    environment: { PORT: "3010" }
+
+  notification-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: notification-service } }
+    environment: { PORT: "3011" }
+
+  analytics-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: analytics-service } }
+    environment: { PORT: "3012" }
+
+  fraud-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: fraud-service } }
+    environment: { PORT: "3013" }
+
+  listener-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: listener-service } }
+    environment: { PORT: "3014" }
+
+  admin-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: admin-service } }
+    environment: { PORT: "3015" }
+
+  swap-service:
+    <<: *service-defaults
+    build: { <<: *build-context, args: { SERVICE_NAME: swap-service } }
+    environment: { PORT: "3016" }
+
+  # ── Optional monitoring — off by default, enable with: ─────────────────
+  #   docker compose --profile monitoring up -d
+  # Nothing in your services currently emits Prometheus metrics, so this
+  # starts empty. Worth adding real instrumentation before turning this on.
   prometheus:
     image: prom/prometheus:latest
-    container_name: stablecoin-prometheus
+    profiles: [monitoring]
     restart: unless-stopped
-    volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
+    networks: [backend]
     ports:
-      - "9090:9090"
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.retention.time=7d'
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
   grafana:
     image: grafana/grafana:latest
-    container_name: stablecoin-grafana
+    profiles: [monitoring]
     restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
-      GF_USERS_ALLOW_SIGN_UP:     "false"
+    networks: [backend]
+    ports:
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
-    ports:
-      - "3100:3000"
-    depends_on:
-      - prometheus
-
-volumes:
-  postgres_data:
-  redis_data:
-  kafka_data:
-  zookeeper_data:
-  prometheus_data:
-  grafana_data:
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
