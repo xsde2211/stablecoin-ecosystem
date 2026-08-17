@@ -44,7 +44,9 @@ const evmProviders = new Map<string, ethers.JsonRpcProvider>();
 function getEvmProvider(chain: ChainConfig): ethers.JsonRpcProvider {
   let provider = evmProviders.get(chain.id);
   if (!provider) {
-    provider = new ethers.JsonRpcProvider(chain.rpc, undefined, { batchMaxCount: 1 });
+    const fetchRequest = new ethers.FetchRequest(chain.rpc);
+    fetchRequest.timeout = 20_000;
+    provider = new ethers.JsonRpcProvider(fetchRequest, undefined, { batchMaxCount: 1 });
     evmProviders.set(chain.id, provider);
   }
   return provider;

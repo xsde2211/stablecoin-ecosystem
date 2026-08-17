@@ -43,7 +43,7 @@ export const CHAINS: ChainConfig[] = [
     id: 'polygon',
     label: 'Polygon',
     kind: 'evm',
-    rpc: import.meta.env.VITE_POLYGON_RPC || 'https://rpc-amoy.polygon.technology',
+    rpc: import.meta.env.VITE_POLYGON_RPC || 'https://polygon-amoy-bor-rpc.publicnode.com',,
     tokens: {
       INRX: import.meta.env.VITE_POLYGON_INRX_ADDRESS || '0xd52280A15b30e5EdfFF858E7EC22266604358F26',
       EGOLD: import.meta.env.VITE_POLYGON_EGOLD_ADDRESS || '0x73Ade2F340d65b75b900B4042DF07Bfb83Dc9D13',
