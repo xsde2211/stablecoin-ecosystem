@@ -44,6 +44,11 @@ const evmProviders = new Map<string, ethers.JsonRpcProvider>();
 function getEvmProvider(chain: ChainConfig): ethers.JsonRpcProvider {
   let provider = evmProviders.get(chain.id);
   if (!provider) {
+    // A plain URL string has no timeout — a slow/hanging RPC call (see
+    // the from-block-0 log scan below) then just spins forever with no
+    // visible error, which is exactly the "stuck scanning" symptom on
+    // BSC. FetchRequest lets us cap it so a genuinely hung request
+    // surfaces as a real, catchable error after 20s instead.
     const fetchRequest = new ethers.FetchRequest(chain.rpc);
     fetchRequest.timeout = 20_000;
     provider = new ethers.JsonRpcProvider(fetchRequest, undefined, { batchMaxCount: 1 });
@@ -205,13 +210,17 @@ async function fetchLogsViaEtherscan(chain: ChainConfig, tokenAddress: string, f
 
   try {
     const res = await fetch(url.toString());
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn(`[${chain.id}] Etherscan getLogs HTTP ${res.status} — falling back to RPC`);
+      return null;
+    }
     const json = await res.json();
     if (json.status !== '1' || !Array.isArray(json.result)) {
       // status "0" with an empty result just means "no logs found", which
       // is a valid (if boring) outcome — only treat it as a real failure
       // when the message says something went actually wrong.
       if (json.message === 'No records found') return [];
+      console.warn(`[${chain.id}] Etherscan getLogs returned status="${json.status}" message="${json.message}" result="${json.result}" — falling back to RPC`);
       return null;
     }
     return json.result.map((log: any) => ({
@@ -219,7 +228,8 @@ async function fetchLogsViaEtherscan(chain: ChainConfig, tokenAddress: string, f
       data: log.data,
       blockNumber: parseInt(log.blockNumber, 16),
     }));
-  } catch {
+  } catch (err: any) {
+    console.warn(`[${chain.id}] Etherscan getLogs request failed: ${err?.message ?? err} — falling back to RPC`);
     return null; // network error, timeout, etc — fall back to RPC
   }
 }
@@ -301,6 +311,49 @@ async function readEvmChainHolders(chain: ChainConfig): Promise<ChainHolderData>
 // out not to be accepted — the request just proceeds at the anonymous
 // limit). TVM logs use the exact same encoding as EVM, so once we have the
 // raw topics/data we reuse the same decode logic as the EVM path.
+// Fallback for when TronGrid's convenience event-decoder comes back with
+// an empty `result` (see the comment where this is called from). Fetches
+// the transaction's real receipt logs — raw topics/data, TronGrid's own
+// decoding never involved — and decodes any Transfer log ourselves. Same
+// approach already proven in listener-service for this exact issue.
+const tronTransferIface = new ethers.Interface([
+  'event Transfer(address indexed from, address indexed to, uint256 value)',
+]);
+
+async function decodeTronTransferFromRawLog(
+  chain: ChainConfig, txid: string,
+): Promise<{ from: string; to: string; value: bigint } | null> {
+  try {
+    const res = await fetch(`${chain.rpc.replace(/\/$/, '')}/wallet/gettransactioninfobyid`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(TRONSCAN_API_KEY ? { 'TRON-PRO-API-KEY': TRONSCAN_API_KEY } : {}),
+      },
+      body: JSON.stringify({ value: txid }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+
+    for (const log of json?.log ?? []) {
+      const topics: string[] = (log.topics ?? []).map((t: string) => (t.startsWith('0x') ? t : `0x${t}`));
+      const data = log.data ? (log.data.startsWith('0x') ? log.data : `0x${log.data}`) : '0x';
+      if (!topics.length) continue;
+      let parsed;
+      try {
+        parsed = tronTransferIface.parseLog({ topics, data });
+      } catch {
+        continue; // not a Transfer log (or one we don't have the ABI for) — keep scanning this tx's other logs
+      }
+      if (!parsed || parsed.name !== 'Transfer') continue;
+      return { from: parsed.args.from as string, to: parsed.args.to as string, value: parsed.args.value as bigint };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function readTronTokenHolders(chain: ChainConfig, tokenAddress: string): Promise<TokenHolderData> {
   const { TronWeb } = await loadTronWeb();
   const base58Address = tokenAddress.startsWith('T') ? tokenAddress : TronWeb.address.fromHex(tokenAddress);
@@ -342,13 +395,22 @@ async function readTronTokenHolders(chain: ChainConfig, tokenAddress: string): P
         fromHex = ethers.getAddress(TronWeb.address.toHex(fromT).replace(/^41/, '0x'));
         toHex = ethers.getAddress(TronWeb.address.toHex(toT).replace(/^41/, '0x'));
         value = BigInt(valT);
-      } else if (Array.isArray(event.topics) && event.data !== undefined) {
-        // Fall back to manual decode from raw topics/data.
-        fromHex = ethers.getAddress('0x' + event.topics[1].slice(-40));
-        toHex = ethers.getAddress('0x' + event.topics[2].slice(-40));
-        value = BigInt('0x' + event.data);
       } else {
-        continue; // unrecognized shape — skip rather than crash the whole list
+        // TronGrid's convenience decoder occasionally comes back with a
+        // genuinely empty `result` — the transfer really happened
+        // on-chain, TronGrid's own ABI-decoding just didn't populate it
+        // for that entry (same reliability issue already found and fixed
+        // in listener-service). The `/v1/contracts/:address/events` REST
+        // endpoint used above has no raw topics/data of its own to fall
+        // back to — silently `continue`-ing past these was why balances
+        // and holder counts were coming back empty despite real transfer
+        // activity. Fetch the transaction's real receipt instead, which
+        // does carry raw, undecoded topics/data, and decode it ourselves.
+        const recovered = await decodeTronTransferFromRawLog(chain, event.transaction_id);
+        if (!recovered) continue; // genuinely undecodable — skip just this one event
+        fromHex = recovered.from;
+        toHex = recovered.to;
+        value = recovered.value;
       }
 
       applyTransferDeltas(cache.balances, fromHex, toHex, value);
