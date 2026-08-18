@@ -62,8 +62,9 @@ const EVM_RPC_CANDIDATES: Record<string, string[]> = {
     'https://polygon-amoy.gateway.tenderly.co',
   ],
   bsc: [
+    'https://bsc-prebsc-dataseed.bnbchain.org',
+    'https://bsc-testnet.bnbchain.org',
     'https://bsc-testnet-rpc.publicnode.com',
-    'https://bsc-testnet.drpc.org',
     'https://rpc.ankr.com/bsc_testnet_chapel',
     // Removed: bsc-testnet.public.blastapi.io (sends no CORS headers at
     // all — blocked before the request even reaches Blast) and the
@@ -123,14 +124,40 @@ async function failoverToNextProvider(chain: ChainConfig, afterIndex: number): P
 async function getEvmProvider(chain: ChainConfig): Promise<ethers.JsonRpcProvider> {
   const cached = evmProviders.get(chain.id);
   if (cached) return cached.provider;
-  return failoverToNextProvider(chain, -1);
+  return coalescedFailover(chain, -1);
 }
 
-// The actual "switch to another RPC after a timeout" behavior: runs `fn`
-// against whichever provider is currently live for this chain; if it
-// throws (timeout, rate limit, connection error, anything), moves on to
-// the next candidate RPC and retries once against that before giving up.
+// Everything reading a chain's balances/holders fetches INRX/EGOLD/ESLVR
+// concurrently (Promise.all) — each of those independently calls
+// withEvmFailover several times. Without coalescing, the moment the
+// shared provider dies, ALL of those concurrent calls detect the failure
+// at once and each launches its OWN parallel probe sequence — 6+
+// simultaneous bursts hammering every candidate at the same time, instead
+// of one clean failover. That's what "repeatedly at fast speed" actually
+// was. This makes concurrent callers share a single in-flight probe.
+const failoverInFlight = new Map<string, Promise<ethers.JsonRpcProvider>>();
+
+function coalescedFailover(chain: ChainConfig, afterIndex: number): Promise<ethers.JsonRpcProvider> {
+  const existing = failoverInFlight.get(chain.id);
+  if (existing) return existing;
+  const attempt = failoverToNextProvider(chain, afterIndex).finally(() => failoverInFlight.delete(chain.id));
+  failoverInFlight.set(chain.id, attempt);
+  return attempt;
+}
+
+// If every candidate RPC just failed, don't let the very next poll tick
+// (or another concurrent caller) immediately re-probe all of them again —
+// that's the other half of "fast speed" repetition. Back off for a bit
+// and fail fast instead.
+const allFailedUntil = new Map<string, number>();
+const ALL_FAILED_COOLDOWN_MS = 15_000;
+
 async function withEvmFailover<T>(chain: ChainConfig, fn: (provider: ethers.JsonRpcProvider) => Promise<T>): Promise<T> {
+  const coolingDown = allFailedUntil.get(chain.id);
+  if (coolingDown && Date.now() < coolingDown) {
+    throw new Error(`[${chain.id}] all RPC endpoints recently failed — cooling down for ${Math.ceil((coolingDown - Date.now()) / 1000)}s before retrying`);
+  }
+
   const provider = await getEvmProvider(chain);
   try {
     return await fn(provider);
@@ -138,10 +165,16 @@ async function withEvmFailover<T>(chain: ChainConfig, fn: (provider: ethers.Json
     const failedIndex = evmProviders.get(chain.id)?.index ?? -1;
     console.warn(`[${chain.id}] RPC call failed (${err?.shortMessage ?? err?.message ?? err}) — failing over to next RPC`);
     evmProviders.delete(chain.id);
-    const nextProvider = await failoverToNextProvider(chain, failedIndex);
-    return fn(nextProvider);
+    try {
+      const nextProvider = await coalescedFailover(chain, failedIndex);
+      return await fn(nextProvider);
+    } catch (failoverErr) {
+      allFailedUntil.set(chain.id, Date.now() + ALL_FAILED_COOLDOWN_MS);
+      throw failoverErr;
+    }
   }
 }
+
 
 let tronWebModulePromise: Promise<typeof import('tronweb')> | null = null;
 function loadTronWeb() {
