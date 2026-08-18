@@ -38,23 +38,97 @@ const ETHERSCAN_CHAIN_IDS: Record<string, number> = {
   bsc: 97,            // BSC testnet
 };
 
-// ─── Providers / clients (cached per chain) ─────────────────────────────────
+// ─── Providers / clients (with automatic multi-RPC failover) ───────────────
+//
+// A single RPC endpoint being flaky (slow, rate-limited, or just down) was
+// the recurring BSC problem — a longer timeout alone doesn't fix an
+// endpoint that's genuinely unreliable, it just waits longer before
+// failing. This tries several known-good public endpoints per chain in
+// order, starting with whatever's configured via env (so a deliberate
+// override — a paid/dedicated RPC — is always tried first), and actually
+// switches to the next one whenever a call times out or errors, not just
+// once at startup.
+const EVM_RPC_CANDIDATES: Record<string, string[]> = {
+  ethereum: [
+    'https://ethereum-sepolia-rpc.publicnode.com',
+    'https://rpc.sepolia.org',
+    'https://sepolia.drpc.org',
+    'https://1rpc.io/sepolia',
+  ],
+  polygon: [
+    'https://polygon-amoy-bor-rpc.publicnode.com',
+    'https://rpc.ankr.com/polygon_amoy',
+    'https://polygon-amoy.drpc.org',
+    'https://polygon-amoy.gateway.tenderly.co',
+  ],
+  bsc: [
+    'https://bsc-testnet-rpc.publicnode.com',
+    'https://data-seed-prebsc-1-s1.bnbchain.org:8545',
+    'https://data-seed-prebsc-2-s1.bnbchain.org:8545',
+    'https://bsc-testnet.public.blastapi.io',
+    'https://bsc-testnet.drpc.org',
+  ],
+};
 
-const evmProviders = new Map<string, ethers.JsonRpcProvider>();
-function getEvmProvider(chain: ChainConfig): ethers.JsonRpcProvider {
-  let provider = evmProviders.get(chain.id);
-  if (!provider) {
-    // A plain URL string has no timeout — a slow/hanging RPC call (see
-    // the from-block-0 log scan below) then just spins forever with no
-    // visible error, which is exactly the "stuck scanning" symptom on
-    // BSC. FetchRequest lets us cap it so a genuinely hung request
-    // surfaces as a real, catchable error after 20s instead.
-    const fetchRequest = new ethers.FetchRequest(chain.rpc);
-    fetchRequest.timeout = 20_000;
-    provider = new ethers.JsonRpcProvider(fetchRequest, undefined, { batchMaxCount: 1 });
-    evmProviders.set(chain.id, provider);
+function candidateUrls(chain: ChainConfig): string[] {
+  // chain.rpc first (respects env overrides / a deliberately-configured
+  // dedicated endpoint), then the known-reliable public mirrors, with
+  // duplicates removed.
+  return Array.from(new Set([chain.rpc, ...(EVM_RPC_CANDIDATES[chain.id] ?? [])]));
+}
+
+const PER_RPC_TIMEOUT_MS = 12_000; // shorter than before — trying 2-3 RPCs at 12s each still beats waiting 20s+ on one dead one
+
+function buildProvider(url: string): ethers.JsonRpcProvider {
+  const fetchRequest = new ethers.FetchRequest(url);
+  fetchRequest.timeout = PER_RPC_TIMEOUT_MS;
+  return new ethers.JsonRpcProvider(fetchRequest, undefined, { batchMaxCount: 1 });
+}
+
+interface LiveProvider { provider: ethers.JsonRpcProvider; index: number; url: string }
+const evmProviders = new Map<string, LiveProvider>();
+
+// Probes candidates in order (a trivial getBlockNumber() call) starting
+// just after `afterIndex`, and caches + returns the first one that
+// actually responds. `afterIndex = -1` means "start from the top."
+async function failoverToNextProvider(chain: ChainConfig, afterIndex: number): Promise<ethers.JsonRpcProvider> {
+  const urls = candidateUrls(chain);
+  for (let i = afterIndex + 1; i < urls.length; i++) {
+    const url = urls[i];
+    const provider = buildProvider(url);
+    try {
+      await provider.getBlockNumber();
+      console.info(`[${chain.id}] using RPC #${i}: ${url}`);
+      evmProviders.set(chain.id, { provider, index: i, url });
+      return provider;
+    } catch (err: any) {
+      console.warn(`[${chain.id}] RPC #${i} (${url}) unreachable: ${err?.shortMessage ?? err?.message ?? err} — trying next`);
+    }
   }
-  return provider;
+  throw new Error(`[${chain.id}] all ${urls.length} RPC endpoints failed`);
+}
+
+async function getEvmProvider(chain: ChainConfig): Promise<ethers.JsonRpcProvider> {
+  const cached = evmProviders.get(chain.id);
+  if (cached) return cached.provider;
+  return failoverToNextProvider(chain, -1);
+}
+
+// The actual "switch to another RPC after a timeout" behavior: runs `fn`
+// against whichever provider is currently live for this chain; if it
+// throws (timeout, rate limit, connection error, anything), moves on to
+// the next candidate RPC and retries once against that before giving up.
+async function withEvmFailover<T>(chain: ChainConfig, fn: (provider: ethers.JsonRpcProvider) => Promise<T>): Promise<T> {
+  const provider = await getEvmProvider(chain);
+  try {
+    return await fn(provider);
+  } catch (err: any) {
+    const failedIndex = evmProviders.get(chain.id)?.index ?? -1;
+    console.warn(`[${chain.id}] RPC call failed (${err?.shortMessage ?? err?.message ?? err}) — failing over to next RPC`);
+    evmProviders.delete(chain.id);
+    const nextProvider = await failoverToNextProvider(chain, failedIndex);
+    return fn(nextProvider);
+  }
 }
 
 let tronWebModulePromise: Promise<typeof import('tronweb')> | null = null;
@@ -81,22 +155,23 @@ async function getTronClient(chain: ChainConfig) {
 
 // ─── Legacy: single-address balance (kept for anything still using it) ──────
 
-async function readEvmTokenBalance(provider: ethers.JsonRpcProvider, tokenAddress: string, holderAddress: string): Promise<number> {
+async function readEvmTokenBalance(chain: ChainConfig, tokenAddress: string, holderAddress: string): Promise<number> {
   if (!holderAddress) return 0;
-  const contract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-  const [raw, decimals] = await Promise.all([
-    contract.balanceOf(holderAddress),
-    contract.decimals().catch(() => 18),
-  ]);
-  return Number(ethers.formatUnits(raw, decimals));
+  return withEvmFailover(chain, async (provider) => {
+    const contract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
+    const [raw, decimals] = await Promise.all([
+      contract.balanceOf(holderAddress),
+      contract.decimals().catch(() => 18),
+    ]);
+    return Number(ethers.formatUnits(raw, decimals));
+  });
 }
 
 async function readEvmBalances(chain: ChainConfig): Promise<TokenBalances> {
-  const provider = getEvmProvider(chain);
   const [INRX, EGOLD, ESLVR] = await Promise.all([
-    readEvmTokenBalance(provider, chain.tokens.INRX, chain.bridge),
-    readEvmTokenBalance(provider, chain.tokens.EGOLD, chain.bridge),
-    readEvmTokenBalance(provider, chain.tokens.ESLVR, chain.bridge),
+    readEvmTokenBalance(chain, chain.tokens.INRX, chain.bridge),
+    readEvmTokenBalance(chain, chain.tokens.EGOLD, chain.bridge),
+    readEvmTokenBalance(chain, chain.tokens.ESLVR, chain.bridge),
   ]);
   return { INRX, EGOLD, ESLVR };
 }
@@ -236,22 +311,22 @@ async function fetchLogsViaEtherscan(chain: ChainConfig, tokenAddress: string, f
 
 const EVM_LOG_CHUNK_BLOCKS = 50_000;
 
-async function fetchLogsViaRpc(provider: ethers.JsonRpcProvider, tokenAddress: string, fromBlock: number, latestBlock: number): Promise<RawLog[]> {
+async function fetchLogsViaRpc(chain: ChainConfig, tokenAddress: string, fromBlock: number, latestBlock: number): Promise<RawLog[]> {
   const all: RawLog[] = [];
   let from = fromBlock;
   while (from <= latestBlock) {
     const to = Math.min(from + EVM_LOG_CHUNK_BLOCKS - 1, latestBlock);
     try {
-      const logs = await provider.getLogs({ address: tokenAddress, topics: [TRANSFER_TOPIC0], fromBlock: from, toBlock: to });
+      const logs = await withEvmFailover(chain, (p) => p.getLogs({ address: tokenAddress, topics: [TRANSFER_TOPIC0], fromBlock: from, toBlock: to }));
       for (const log of logs) all.push({ topics: log.topics as string[], data: log.data, blockNumber: log.blockNumber });
       from = to + 1;
     } catch {
-      // This window was rejected (range too large for this RPC, or a
-      // transient error) — retry with a much smaller window instead of
-      // failing the whole scan over one bad chunk.
+      // Every candidate RPC failed on this window (not just one of them) —
+      // retry with a much smaller window instead of failing the whole
+      // scan over one bad chunk.
       const smallerTo = Math.min(from + Math.floor(EVM_LOG_CHUNK_BLOCKS / 5) - 1, latestBlock);
       try {
-        const logs = await provider.getLogs({ address: tokenAddress, topics: [TRANSFER_TOPIC0], fromBlock: from, toBlock: smallerTo });
+        const logs = await withEvmFailover(chain, (p) => p.getLogs({ address: tokenAddress, topics: [TRANSFER_TOPIC0], fromBlock: from, toBlock: smallerTo }));
         for (const log of logs) all.push({ topics: log.topics as string[], data: log.data, blockNumber: log.blockNumber });
       } catch {
         // give up on this window entirely rather than looping forever
@@ -272,9 +347,7 @@ function applyRawLog(log: RawLog, balances: Map<string, bigint>) {
 }
 
 async function readEvmTokenHolders(chain: ChainConfig, tokenAddress: string): Promise<TokenHolderData> {
-  const provider = getEvmProvider(chain);
-  const contract = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
-  const decimals = await contract.decimals().catch(() => 18);
+  const decimals = await withEvmFailover(chain, (p) => new ethers.Contract(tokenAddress, ERC20_ABI, p).decimals()).catch(() => 18);
 
   const cacheKey = `evm:${tokenAddress}`;
   let cache = holderCaches.get(cacheKey);
@@ -283,12 +356,12 @@ async function readEvmTokenHolders(chain: ChainConfig, tokenAddress: string): Pr
     holderCaches.set(cacheKey, cache);
   }
 
-  const latestBlock = await provider.getBlockNumber();
+  const latestBlock = await withEvmFailover(chain, (p) => p.getBlockNumber());
   const fromBlock = cache.lastScannedBlock + 1;
 
   if (fromBlock <= latestBlock) {
     const etherscanLogs = await fetchLogsViaEtherscan(chain, tokenAddress, fromBlock);
-    const logs = etherscanLogs ?? await fetchLogsViaRpc(provider, tokenAddress, fromBlock, latestBlock);
+    const logs = etherscanLogs ?? await fetchLogsViaRpc(chain, tokenAddress, fromBlock, latestBlock);
     for (const log of logs) applyRawLog(log, cache.balances);
     cache.lastScannedBlock = latestBlock;
   }
