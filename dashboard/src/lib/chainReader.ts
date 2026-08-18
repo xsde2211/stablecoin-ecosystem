@@ -63,10 +63,13 @@ const EVM_RPC_CANDIDATES: Record<string, string[]> = {
   ],
   bsc: [
     'https://bsc-testnet-rpc.publicnode.com',
-    'https://data-seed-prebsc-1-s1.bnbchain.org:8545',
-    'https://data-seed-prebsc-2-s1.bnbchain.org:8545',
-    'https://bsc-testnet.public.blastapi.io',
     'https://bsc-testnet.drpc.org',
+    'https://rpc.ankr.com/bsc_testnet_chapel',
+    // Removed: bsc-testnet.public.blastapi.io (sends no CORS headers at
+    // all — blocked before the request even reaches Blast) and the
+    // official data-seed-prebsc-* endpoints (connection reset from a
+    // browser origin) — both confirmed broken via console errors, not a
+    // guess.
   ],
 };
 
@@ -79,10 +82,18 @@ function candidateUrls(chain: ChainConfig): string[] {
 
 const PER_RPC_TIMEOUT_MS = 12_000; // shorter than before — trying 2-3 RPCs at 12s each still beats waiting 20s+ on one dead one
 
-function buildProvider(url: string): ethers.JsonRpcProvider {
+function buildProvider(url: string, chainId: number): ethers.JsonRpcProvider {
   const fetchRequest = new ethers.FetchRequest(url);
   fetchRequest.timeout = PER_RPC_TIMEOUT_MS;
-  return new ethers.JsonRpcProvider(fetchRequest, undefined, { batchMaxCount: 1 });
+  // Passing a static Network (instead of leaving ethers to auto-detect it)
+  // skips ethers' own internal _detectNetwork() call and its independent
+  // retry-with-backoff loop entirely — that's what "JsonRpcProvider failed
+  // to detect network and cannot start up; retry in 1s" is. Without this,
+  // a dead endpoint keeps retrying itself in the background on ethers'
+  // own schedule even after our failover has already moved on to a
+  // working RPC, which is what made the errors repeat continuously
+  // instead of failing over once and going quiet.
+  return new ethers.JsonRpcProvider(fetchRequest, ethers.Network.from(chainId), { batchMaxCount: 1, staticNetwork: true });
 }
 
 interface LiveProvider { provider: ethers.JsonRpcProvider; index: number; url: string }
@@ -93,9 +104,10 @@ const evmProviders = new Map<string, LiveProvider>();
 // actually responds. `afterIndex = -1` means "start from the top."
 async function failoverToNextProvider(chain: ChainConfig, afterIndex: number): Promise<ethers.JsonRpcProvider> {
   const urls = candidateUrls(chain);
+  const chainId = ETHERSCAN_CHAIN_IDS[chain.id];
   for (let i = afterIndex + 1; i < urls.length; i++) {
     const url = urls[i];
-    const provider = buildProvider(url);
+    const provider = buildProvider(url, chainId);
     try {
       await provider.getBlockNumber();
       console.info(`[${chain.id}] using RPC #${i}: ${url}`);
