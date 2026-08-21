@@ -809,16 +809,21 @@ async function readEvmTokenHolders(
   let cache =
     holderCaches.get(cacheKey);
 
-  if (!cache) {
-    // No deployment block is required.
-    //
-    // The scanner starts at block 0 for a new token cache.
-    // Once the first scan completes, subsequent polls only scan
-    // blocks after lastScannedBlock.
+    if (!cache) {
+    // Start from the token's actual deployment block when it's
+    // configured (chain.deployBlock, via VITE_*_DEPLOY_BLOCK) — starting
+    // from 0 unconditionally meant the first scan on a chain with a long
+    // history (BSC testnet is tens of millions of blocks deep) had to
+    // crawl the ENTIRE chain in small chunks before it could ever
+    // finish, which is indistinguishable from "stuck" no matter how
+    // reliable the RPC is. Falls back to 0 (previous behavior) if
+    // deployBlock isn't set for this chain.
+    const startBlock = Math.max(0, (chain.deployBlock ?? 0) - 1);
+
     cache = {
       balances:
         new Map<string, bigint>(),
-      lastScannedBlock: -1,
+      lastScannedBlock: startBlock === 0 ? -1 : startBlock,
     };
 
     holderCaches.set(

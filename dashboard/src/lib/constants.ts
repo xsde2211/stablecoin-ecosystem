@@ -19,6 +19,18 @@ export interface ChainConfig {
    * unless a token is specifically designed to hold its own supply.
    */
   bridge: string;
+  /**
+   * Block the token contracts were actually deployed at on this chain.
+   * Without this, the holder/total-minted scanner has no choice but to
+   * start from block 0 — on a testnet with tens of millions of blocks
+   * (BSC testnet, for one), that's tens of thousands of sequential
+   * requests before the FIRST scan could ever finish, which looks
+   * identical to "stuck" regardless of how reliable the RPC is. Find the
+   * real number from that chain's contract page ("Contract Creation" tx)
+   * on its block explorer and set it via the matching VITE_*_DEPLOY_BLOCK
+   * env var. Defaults to 0 (current behavior) when not set.
+   */
+  deployBlock?: number;
   explorerTx?: string; // template for building a "view on explorer" link, {tx} placeholder
 }
 
@@ -38,6 +50,7 @@ export const CHAINS: ChainConfig[] = [
       ESLVR: import.meta.env.VITE_ETH_ESLVR_ADDRESS || '0x90Eec2B99d92dEbf8719AACFB173b32Dcf791D88',
     },
     bridge: import.meta.env.VITE_ETH_BRIDGE_ADDRESS || '0x519ecfeBA19B5EDE6Cfd9eD7B6d33513924957Db',
+    deployBlock: Number(import.meta.env.VITE_ETH_DEPLOY_BLOCK) || 0,
   },
   {
     id: 'polygon',
@@ -51,6 +64,7 @@ export const CHAINS: ChainConfig[] = [
     },
     // No known default here — set VITE_POLYGON_BRIDGE_ADDRESS in .env.
     bridge: import.meta.env.VITE_POLYGON_BRIDGE_ADDRESS || '',
+    deployBlock: Number(import.meta.env.VITE_POLYGON_DEPLOY_BLOCK) || 0,
   },
   {
     id: 'bsc',
@@ -67,6 +81,11 @@ export const CHAINS: ChainConfig[] = [
     },
     // No known default here — set VITE_BSC_BRIDGE_ADDRESS in .env.
     bridge: import.meta.env.VITE_BSC_BRIDGE_ADDRESS || '0x0458711652eDD24D107a929f598fb877aA165848',
+    // This one matters most: BSC testnet is tens of millions of blocks
+    // deep, so without a real deployBlock here, the scanner has to crawl
+    // from 0 in small chunks (see EVM_LOG_CHUNK_BLOCKS below) — set
+    // VITE_BSC_DEPLOY_BLOCK to your contracts' actual creation block.
+    deployBlock: Number(import.meta.env.VITE_BSC_DEPLOY_BLOCK) || 0,
   },
   {
     id: 'tron',
