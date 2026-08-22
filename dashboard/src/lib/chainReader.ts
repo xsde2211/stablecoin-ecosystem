@@ -92,39 +92,34 @@ function buildProvider(
   );
 }
 
-interface LiveProvider {
-  provider: ethers.JsonRpcProvider;
-  index: number;
+interface LiveRpc {
   url: string;
+  index: number;
 }
 
-const evmProviders = new Map<string, LiveProvider>();
+const evmRpcs = new Map<string, LiveRpc>();
 
-async function failoverToNextProvider(
+async function probeForLiveRpc(
   chain: ChainConfig,
   afterIndex: number
-): Promise<ethers.JsonRpcProvider> {
+): Promise<LiveRpc> {
   const urls = candidateUrls(chain);
   const chainId = ETHERSCAN_CHAIN_IDS[chain.id];
 
   for (let i = afterIndex + 1; i < urls.length; i++) {
     const url = urls[i];
-    const provider = buildProvider(url, chainId);
+    const probe = buildProvider(url, chainId);
 
     try {
-      await provider.getBlockNumber();
+      await probe.getBlockNumber();
 
       console.info(
         `[${chain.id}] using RPC #${i}: ${url}`
       );
 
-      evmProviders.set(chain.id, {
-        provider,
-        index: i,
-        url,
-      });
-
-      return provider;
+      const rpc = { url, index: i };
+      evmRpcs.set(chain.id, rpc);
+      return rpc;
     } catch (err: any) {
       console.warn(
         `[${chain.id}] RPC #${i} (${url}) unreachable: ${
@@ -139,36 +134,36 @@ async function failoverToNextProvider(
   );
 }
 
-async function getEvmProvider(
+async function getLiveRpc(
   chain: ChainConfig
-): Promise<ethers.JsonRpcProvider> {
-  const cached = evmProviders.get(chain.id);
+): Promise<LiveRpc> {
+  const cached = evmRpcs.get(chain.id);
 
   if (cached) {
-    return cached.provider;
+    return cached;
   }
 
   return coalescedFailover(chain, -1);
 }
 
 // Coalesce concurrent failover attempts so INRX/EGOLD/ESLVR do not
-// simultaneously probe every RPC when the shared provider fails.
+// simultaneously probe every RPC when the current one fails.
 const failoverInFlight = new Map<
   string,
-  Promise<ethers.JsonRpcProvider>
+  Promise<LiveRpc>
 >();
 
 function coalescedFailover(
   chain: ChainConfig,
   afterIndex: number
-): Promise<ethers.JsonRpcProvider> {
+): Promise<LiveRpc> {
   const existing = failoverInFlight.get(chain.id);
 
   if (existing) {
     return existing;
   }
 
-  const attempt = failoverToNextProvider(
+  const attempt = probeForLiveRpc(
     chain,
     afterIndex
   ).finally(() => {
@@ -203,27 +198,36 @@ async function withEvmFailover<T>(
     );
   }
 
-  const provider = await getEvmProvider(chain);
+  const rpc = await getLiveRpc(chain);
+  const chainId = ETHERSCAN_CHAIN_IDS[chain.id];
+  // A FRESH provider instance for every single call, never shared or
+  // cached — this is the actual fix for "could not coalesce error". That
+  // error is ethers losing track of which in-flight request a response
+  // belongs to, which only happens when concurrent calls race through the
+  // SAME provider object's internal request bookkeeping. INRX/EGOLD/ESLVR
+  // are always fetched concurrently, so a cached, shared provider was
+  // exactly the collision condition. A throwaway provider per call costs
+  // nothing meaningful (no real connection setup until the request goes
+  // out) and makes the collision structurally impossible.
+  const provider = buildProvider(rpc.url, chainId);
 
   try {
     return await fn(provider);
   } catch (err: any) {
-    const failedIndex =
-      evmProviders.get(chain.id)?.index ?? -1;
-
     console.warn(
       `[${chain.id}] RPC call failed (${
         err?.shortMessage ?? err?.message ?? err
       }) — failing over to next RPC`
     );
 
-    evmProviders.delete(chain.id);
+    evmRpcs.delete(chain.id);
 
     try {
-      const nextProvider = await coalescedFailover(
+      const nextRpc = await coalescedFailover(
         chain,
-        failedIndex
+        rpc.index
       );
+      const nextProvider = buildProvider(nextRpc.url, chainId);
 
       return await fn(nextProvider);
     } catch (failoverErr) {
@@ -620,17 +624,22 @@ const EVM_LOG_CHUNK_BLOCKS: Record<
 > = {
   ethereum: 50_000,
   polygon: 10_000,
-  bsc: 2_000,
+  // Was 2,000 — 5x smaller than Polygon's for no confirmed reason, which
+  // multiplied the number of round-trips needed for a full scan on top of
+  // everything else. 10,000 matches Polygon's; if this genuinely gets
+  // rejected by publicnode/ankr for BSC specifically (watch the console
+  // for "failed scanning blocks..." followed by a successful smaller
+  // retry), dial it back down — but try this first.
+  bsc: 10_000,
 };
 
 async function fetchLogsViaRpc(
   chain: ChainConfig,
   tokenAddress: string,
   fromBlock: number,
-  latestBlock: number
-): Promise<RawLog[]> {
-  const all: RawLog[] = [];
-
+  latestBlock: number,
+  cache: HolderCache
+): Promise<void> {
   const chunkSize =
     EVM_LOG_CHUNK_BLOCKS[chain.id] ??
     2_000;
@@ -658,15 +667,22 @@ async function fetchLogsViaRpc(
             })
         );
 
+      // Apply and persist THIS chunk immediately — not batched up to
+      // apply all at once at the very end. A scan that covers hundreds
+      // of chunks (BSC testnet, before deployBlock narrows the range
+      // down) could otherwise run for a long time and lose ALL of that
+      // progress the moment anything interrupts it (a page refresh, the
+      // tab backgrounding, an unrelated error) — every chunk applied
+      // here is real, durable progress, immediately reflected in
+      // cache.lastScannedBlock, so a resumed/duplicate scan (see the
+      // in-flight lock in readEvmTokenHolders) never has to redo it.
       for (const log of logs) {
-        all.push({
-          topics:
-            log.topics as string[],
-          data: log.data,
-          blockNumber:
-            log.blockNumber,
-        });
+        applyRawLog(
+          { topics: log.topics as string[], data: log.data, blockNumber: log.blockNumber },
+          cache.balances
+        );
       }
+      cache.lastScannedBlock = to;
 
       console.info(
         `[${chain.id}] scanned blocks ${from} → ${to}, found ${logs.length} Transfer logs`
@@ -720,14 +736,12 @@ async function fetchLogsViaRpc(
           );
 
         for (const log of logs) {
-          all.push({
-            topics:
-              log.topics as string[],
-            data: log.data,
-            blockNumber:
-              log.blockNumber,
-          });
+          applyRawLog(
+            { topics: log.topics as string[], data: log.data, blockNumber: log.blockNumber },
+            cache.balances
+          );
         }
+        cache.lastScannedBlock = smallerTo;
 
         console.info(
           `[${chain.id}] retry scanned blocks ${from} → ${smallerTo}, found ${logs.length} Transfer logs`
@@ -738,7 +752,10 @@ async function fetchLogsViaRpc(
         // IMPORTANT:
         // Do not silently skip blocks.
         // If even the smaller range fails, stop this scan.
-        // The next polling cycle can retry it.
+        // The next polling cycle can retry it — and will resume from
+        // cache.lastScannedBlock (the last successful chunk), not from
+        // the original fromBlock, since every prior chunk was already
+        // persisted above.
         throw new Error(
           `[${chain.id}] unable to scan blocks ${from} → ${smallerTo}: ${
             retryErr?.shortMessage ??
@@ -749,8 +766,6 @@ async function fetchLogsViaRpc(
       }
     }
   }
-
-  return all;
 }
 
 function applyRawLog(
@@ -788,9 +803,39 @@ function applyRawLog(
 
 // ─── EVM token holders ───────────────────────────────────────────────────────
 
+// A scan of one token can legitimately take a while (hundreds of chunks
+// on BSC before deployBlock narrows things down). Without this, the next
+// 45s poll tick calls readEvmTokenHolders again before the previous call
+// has finished, sees the SAME stale cache.lastScannedBlock (not updated
+// yet), and starts a second, fully redundant scan of the same range —
+// and a third on the next tick, and so on. That's exactly what produced
+// the wildly out-of-order, never-resolving block ranges in the console:
+// several overlapping scans of the same token, each restarting from
+// scratch, none of them ever finishing before the next one piled on.
+// This makes concurrent calls for the same token share one in-flight
+// scan instead.
+const tokenScanInFlight = new Map<string, Promise<TokenHolderData>>();
+
 async function readEvmTokenHolders(
   chain: ChainConfig,
   tokenAddress: string
+): Promise<TokenHolderData> {
+  const cacheKey =
+    `evm:${chain.id}:${tokenAddress.toLowerCase()}`;
+
+  const existing = tokenScanInFlight.get(cacheKey);
+  if (existing) return existing;
+
+  const attempt = readEvmTokenHoldersUncached(chain, tokenAddress, cacheKey)
+    .finally(() => tokenScanInFlight.delete(cacheKey));
+  tokenScanInFlight.set(cacheKey, attempt);
+  return attempt;
+}
+
+async function readEvmTokenHoldersUncached(
+  chain: ChainConfig,
+  tokenAddress: string,
+  cacheKey: string
 ): Promise<TokenHolderData> {
   const decimals =
     await withEvmFailover(
@@ -802,9 +847,6 @@ async function readEvmTokenHolders(
           provider
         ).decimals()
     ).catch(() => 18);
-
-  const cacheKey =
-    `evm:${chain.id}:${tokenAddress.toLowerCase()}`;
 
   let cache =
     holderCaches.get(cacheKey);
@@ -843,19 +885,20 @@ async function readEvmTokenHolders(
     cache.lastScannedBlock + 1;
 
   if (fromBlock <= latestBlock) {
-    let logs: RawLog[];
-
     if (chain.id === 'bsc') {
       // IMPORTANT:
       // BSC Testnet does NOT use Etherscan here.
-      // Direct RPC scanning is used instead.
-      logs =
-        await fetchLogsViaRpc(
-          chain,
-          tokenAddress,
-          fromBlock,
-          latestBlock
-        );
+      // Direct RPC scanning is used instead. fetchLogsViaRpc now applies
+      // and persists progress into `cache` chunk-by-chunk itself (see
+      // its own comment) rather than returning a big array to apply here
+      // all at once.
+      await fetchLogsViaRpc(
+        chain,
+        tokenAddress,
+        fromBlock,
+        latestBlock,
+        cache
+      );
     } else {
       // Ethereum / Polygon:
       // Try Etherscan first, then RPC.
@@ -866,32 +909,26 @@ async function readEvmTokenHolders(
           fromBlock
         );
 
-      logs =
-        etherscanLogs ??
+      if (etherscanLogs) {
+        // Etherscan returns everything in one shot (not chunked), so
+        // apply-all-at-once is fine here — nothing to lose progress on.
+        const sorted = [...etherscanLogs].sort(
+          (a, b) => a.blockNumber - b.blockNumber
+        );
+        for (const log of sorted) {
+          applyRawLog(log, cache.balances);
+        }
+        cache.lastScannedBlock = latestBlock;
+      } else {
         await fetchLogsViaRpc(
           chain,
           tokenAddress,
           fromBlock,
-          latestBlock
+          latestBlock,
+          cache
         );
+      }
     }
-
-    // Apply logs in block order.
-    logs.sort(
-      (a, b) =>
-        a.blockNumber -
-        b.blockNumber
-    );
-
-    for (const log of logs) {
-      applyRawLog(
-        log,
-        cache.balances
-      );
-    }
-
-    cache.lastScannedBlock =
-      latestBlock;
   }
 
   return toHolderData(
